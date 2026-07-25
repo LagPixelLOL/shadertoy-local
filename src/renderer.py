@@ -33,7 +33,7 @@ from typing import Any, Iterable, Iterator
 
 import numpy as np
 
-from .channels import ChannelTextures
+from .channels import ChannelTextures, sampler_filter_modes, sampler_repeats
 from .context import activate
 from .compose import ComposedShader, compose_pass, vertex_source
 from .diagnostics import Diagnostic, parse_log
@@ -332,13 +332,8 @@ class Renderer:
         sampler = self._samplers.get(key)
         if sampler is None:
             sampler = self.ctx.sampler()
-            if binding.filter == "nearest":
-                sampler.filter = (self.ctx.NEAREST, self.ctx.NEAREST)
-            elif binding.filter == "mipmap":
-                sampler.filter = (self.ctx.LINEAR_MIPMAP_LINEAR, self.ctx.LINEAR)
-            else:
-                sampler.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
-            repeat = binding.wrap == "repeat"
+            sampler.filter = sampler_filter_modes(self.ctx, binding.filter)
+            repeat = sampler_repeats(binding.wrap)
             sampler.repeat_x = repeat
             sampler.repeat_y = repeat
             self._samplers[key] = sampler

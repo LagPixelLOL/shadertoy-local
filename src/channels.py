@@ -148,10 +148,35 @@ _GENERATORS: dict[str, tuple[Any, int]] = {
     "black": (lambda size: _solid(size, 0), 8),
 }
 
-#: Builtins with no counterpart on shadertoy.com.
-LOCAL_ONLY_BUILTINS = frozenset(
-    {"checker", "uv", "gradient", "white", "black"}
-)
+def sampler_filter_modes(ctx: Any, name: str) -> tuple[Any, Any]:
+    """Translate a declared filter name into ``(min, mag)`` GL filter modes.
+
+    Exhaustive on purpose. The obvious spelling is nearest/mipmap/else-linear,
+    but that silently turns any filter added to ``_FILTERS`` without updating this
+    function into linear -- in two separate places, since buffers are sampled
+    through sampler objects and textures through the texture itself. Raising keeps
+    the failure loud and keeps the mapping in one place.
+    """
+    if name == "nearest":
+        return (ctx.NEAREST, ctx.NEAREST)
+    if name == "linear":
+        return (ctx.LINEAR, ctx.LINEAR)
+    if name == "mipmap":
+        return (ctx.LINEAR_MIPMAP_LINEAR, ctx.LINEAR)
+    raise ProjectError(
+        f"unsupported filter {name!r}; sampler_filter_modes needs a case for it"
+    )
+
+
+def sampler_repeats(name: str) -> bool:
+    """Whether a declared wrap name means repeat. Exhaustive for the same reason."""
+    if name == "repeat":
+        return True
+    if name == "clamp":
+        return False
+    raise ProjectError(
+        f"unsupported wrap {name!r}; sampler_repeats needs a case for it"
+    )
 
 
 def builtin_array(name: str, size: int | None = None) -> np.ndarray:
@@ -253,14 +278,10 @@ class ChannelTextures:
 
     def _apply_sampling(self, texture: Any, binding: ChannelBinding) -> None:
         ctx = self.ctx
-        if binding.filter == "nearest":
-            texture.filter = (ctx.NEAREST, ctx.NEAREST)
-        elif binding.filter == "mipmap":
+        if binding.filter == "mipmap":
             texture.build_mipmaps()
-            texture.filter = (ctx.LINEAR_MIPMAP_LINEAR, ctx.LINEAR)
-        else:
-            texture.filter = (ctx.LINEAR, ctx.LINEAR)
-        repeat = binding.wrap == "repeat"
+        texture.filter = sampler_filter_modes(ctx, binding.filter)
+        repeat = sampler_repeats(binding.wrap)
         texture.repeat_x = repeat
         texture.repeat_y = repeat
 
