@@ -2,10 +2,10 @@
 //  PATH-TRACED BOX -- Common tab
 //
 //  One closed room, lit by a frosted globe -- a scattering medium with a bright
-//  filament inside, like an opal bulb -- that cycles hue and pulses on a 120 BPM
-//  kick, plus a dim panel recessed into the ceiling for fill. The classic set
-//  piece for showing what a path tracer buys you: soft shadows, colour bleeding
-//  off four tinted walls and two checkered planes, a glossy floor, a mirror ball,
+//  filament inside, like an opal bulb -- that slowly cycles hue, plus a dim panel
+//  recessed into the ceiling for fill. The classic set piece for showing what a
+//  path tracer buys you: soft shadows, colour bleeding off four tinted walls and
+//  two checkered planes, a glossy floor, a mirror ball,
 //  a tinted glass ball that refracts the room and spills a caustic onto the floor
 //  (a soft one -- the dominant source here is large), and a volumetric source
 //  that is genuinely marched rather than faked.
@@ -222,11 +222,13 @@ const vec3  METAL_F0  = vec3(0.95, 0.92, 0.86);
 //  into a large gentle source.
 //
 //  It stands on the floor in the far corner, behind the block, and it is the
-//  room's MAIN light -- the ceiling panel is only fill. Two reasons: a pulse is
-//  only visible if the pulsing source dominates the light budget, and a large
-//  dim source keeps its radiance below the tonemap's shoulder, which is where
-//  hue survives. It stays well inside the camera orbit: the eye must never end
-//  up inside an emitter.
+//  room's MAIN light -- the ceiling panel is only fill -- because the colour has
+//  to come from somewhere, and a white panel bright enough to light the room
+//  would wash the globe's hue straight back out of it. Large and dim also beats
+//  small and bright here: power goes as radiance x area, so spreading the same
+//  watts over a bigger ball keeps its radiance nearer the tonemap's shoulder,
+//  which is where hue survives. It stays well inside the camera orbit: the eye
+//  must never end up inside an emitter.
 //
 //  ENERGY. Interior rays see the walk; every non-delta vertex in the room gets
 //  the globe by NEE against its surface (see globeLight) treating it as a
@@ -237,42 +239,28 @@ const vec3  METAL_F0  = vec3(0.95, 0.92, 0.86);
 //      L_core = L_globe * (R / r)^2
 //  which is the ratio below. The filament is not made smaller than this on
 //  purpose: that ratio goes as 1/r^2, and every bit of it lands on the variance
-//  of any path that reaches the core through the medium (see CLAMP_INDIRECT). The one approximation left is angular: the walk's
-//  exit radiance is centre-hot rather than uniform, so NEE has the total power
-//  right and its distribution slightly wrong. That is invisible in the room's
-//  lighting and only visible on the globe itself -- where you are looking at the
-//  walk, not at NEE.
+//  of any path that reaches the core through the medium (see CLAMP_INDIRECT).
+//
+//  The one approximation left is angular: the walk's exit radiance is centre-hot
+//  rather than uniform, so NEE has the total power right and its distribution
+//  slightly wrong. That is invisible in the room's lighting and only visible on
+//  the globe itself -- where you are looking at the walk, not at NEE.
 const vec3  GLOBE_C  = vec3( 1.55, 0.65, -1.90);   // y = GLOBE_R: on the floor
 const float GLOBE_R  = 0.65;
 const float CORE_R   = 0.16;                  // the filament
 const float SIGMA_T  = 6.0;                   // extinction (1/m), all scattering
 const float GLOBE_HUE = 15.0;                 // seconds per full hue rotation
-const float BPM      = 120.0;
-const float GLOBE_L_BASE = 1.0;               // steady surface radiance
-const float GLOBE_L_KICK = 5.0;               // added at the peak of a hit
+const float GLOBE_L   = 2.3;                  // surface radiance
 
-// Kick envelope, four-on-the-floor at 120 BPM: one hit per beat, the downbeat of
-// each bar accented, plus a quieter ghost hit on the upbeat so it grooves rather
-// than ticks. Shape is a kick drum's: attack of a couple of frames, decay over
-// roughly a third of a beat. At 60 fps a beat is exactly 30 frames, so hits land
-// on frame boundaries and a golden frame is reproducible.
-float kickEnv(float time) {
-    float beat = time * (BPM / 60.0);
-    float hit = fract(beat);
-    float accent = fract(beat / 4.0) < 0.25 ? 1.0 : 0.72;
-    float e = smoothstep(0.0, 0.03, hit) * exp(-hit * 5.5) * accent;
-    float up = fract(beat + 0.5);
-    e += 0.28 * smoothstep(0.0, 0.03, up) * exp(-up * 9.0);
-    return e;
-}
-
-// Hue rotation at constant luminance: only the chromaticity moves, so exposure
-// does not have to chase the colour wheel around. The pulse rides on top.
+// Hue rotation at constant luminance: only the chromaticity moves, so nothing
+// downstream has to chase the colour wheel around -- the exposure is fixed, and
+// the temporal filter sees a scene whose brightness never changes, which is why
+// it can afford a long history (see Buffer B).
 vec3 globeRadiance(float time) {
     vec3 c = 0.5 + 0.5 * cos(TAU * time / GLOBE_HUE + vec3(0.0, 2.094, 4.189));
     c = pow(c, vec3(1.6));                    // deepen it, so the wash is a hue
     c /= max(lum(c), 0.12);
-    return c * (GLOBE_L_BASE + GLOBE_L_KICK * kickEnv(time));
+    return c * GLOBE_L;
 }
 // The filament, from the energy balance above.
 vec3 coreRadiance(float time) {

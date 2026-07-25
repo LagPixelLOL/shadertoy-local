@@ -82,19 +82,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float slack = clamp(0.8 / EXPOSURE, 0.02, 2.0);
     cur.rgb = min(cur.rgb, m1 + 3.5 * sig + slack);
 
-    // Motion-adaptive accumulation: converge while the camera idles, clamp tight
-    // and refresh fast while it is being dragged.
+    // Motion-adaptive accumulation: converge hard while the camera idles, clamp
+    // tight and refresh fast while it is being dragged.
     //
-    // The idle end is deliberately not as slow as it could be. A longer history
-    // is quieter, but the orb pulses four times a second, and at alpha 0.07 the
-    // filter's own lag swallowed four fifths of that pulse (measured: 12% of the
-    // frame-mean swing reached the screen, against 60% in Buffer A). At 0.18 it
-    // passes 20% for about 0.2/255 more frame-to-frame noise, which is the right
-    // trade for a scene whose lighting actually moves.
+    // The idle end can afford to be this slow because nothing in this scene
+    // changes fast. The lighting is static apart from a hue rotation that takes
+    // 15 seconds, so a history worth ~14 frames costs nothing in lag and buys
+    // the quietest image; the only thing the filter has to keep up with is the
+    // camera, which the motion term already handles.
     float motion = valid ? length(fcPrev - fragCoord) : 1e3;
     float mf = clamp((motion - 0.4) / 6.0, 0.0, 1.0);
-    float GAMMA = mix(1.6, 1.0, mf);
-    float alpha = mix(0.18, 0.38, mf);
+    float GAMMA = mix(2.4, 1.0, mf);
+    float alpha = mix(0.07, 0.38, mf);
     vec3 lo = m1 - GAMMA * sig, hi = m1 + GAMMA * sig;
 
     vec3 col; float mom2;
