@@ -1,4 +1,6 @@
-# shadertoy-local
+# Shadertoy Local
+
+Warning: This project is basically entirely AI vibe shidded LOL.
 
 Headless local Shadertoy runtime and shader test harness, built for automated
 and agentic development.
@@ -562,7 +564,3 @@ That costs about 0.5 s extra. It is worth running before a release: it is how a
 crash on every Mesa driver was found, where Mesa reports an array uniform's
 length as the number of elements the shader indexes while NVIDIA reports the
 full declared length.
-
-## License
-
-MIT
