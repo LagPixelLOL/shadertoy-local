@@ -1,0 +1,31 @@
+{
+  "name": "textured",
+  "description": "Builtin procedural textures with different filter and wrap modes.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "image": {
+    "channels": {
+      "0": {
+        "type": "builtin",
+        "source": "checker",
+        "filter": "nearest",
+        "wrap": "repeat"
+      },
+      "1": {
+        "type": "builtin",
+        "source": "uv",
+        "filter": "linear",
+        "wrap": "clamp"
+      },
+      "2": {
+        "type": "builtin",
+        "source": "noise",
+        "filter": "linear",
+        "wrap": "repeat"
+      }
+    }
+  }
+}

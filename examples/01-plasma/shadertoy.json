@@ -1,0 +1,12 @@
+{
+  "name": "plasma",
+  "description": "Animated plasma. Single pass with no channel inputs.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "image": {
+    "channels": {}
+  }
+}

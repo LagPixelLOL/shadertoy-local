@@ -1,0 +1,29 @@
+{
+  "name": "feedback-trail",
+  "description": "Two orbiting emitters painting decaying trails into Buffer A.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "buffer_a": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "linear",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "image": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "linear",
+        "wrap": "clamp"
+      }
+    }
+  }
+}

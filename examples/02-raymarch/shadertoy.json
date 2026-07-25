@@ -1,0 +1,12 @@
+{
+  "name": "raymarch",
+  "description": "Raymarched SDF scene. Uses common.glsl for shared helpers.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "image": {
+    "channels": {}
+  }
+}

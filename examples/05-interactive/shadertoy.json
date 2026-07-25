@@ -1,0 +1,16 @@
+{
+  "name": "interactive",
+  "description": "Responds to simulated mouse and keyboard input from CLI flags.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "image": {
+    "channels": {
+      "0": {
+        "type": "keyboard"
+      }
+    }
+  }
+}
