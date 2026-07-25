@@ -124,7 +124,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Interior pixels take a single lookup, which is all they need -- the checker
     // inside a face is already filtered analytically over the footprint.
     vec3 gx = dFdx(col), gy = dFdy(col);
-    float pixAng = pixelAngle(iResolution);
+
+    // The albedo the pixel centre was demodulated by in Buffer A, recomputed the
+    // same way from the same footprint. Subsamples landing on that same surface
+    // reuse it verbatim, so the division and the multiplication cancel exactly and
+    // the checker's anti-aliasing is left to where it belongs: the radiance, which
+    // is averaged over the jitter of every sample in the history.
+    //
+    // Letting each subsample filter its own finer footprint instead looks like an
+    // improvement and is not: Buffer A divided by one lookup at the pixel width,
+    // so multiplying back sixteen narrower ones leaves the ratio between the two
+    // estimators in the image. Where the checker is high frequency -- compressed
+    // by the glass ball -- that residue is exactly the hard stair-stepping this is
+    // meant to remove. Subsamples only need their own albedo when they are on a
+    // different surface, which is the coverage case below.
+    float tK; vec3 nK; int mK; vec3 posK, dirK;
+    primaryHitFull(fragCoord, iResolution, ang, tK, nK, mK, posK, dirK);
+    vec2 fwK = psrFootprint(fragCoord, iResolution, ang, tK, nK, mK, posK, dirK);
+    vec3 albC = psrAlbedo(mK, posK, fwK);
 
     ivec2 nb[4];
     nb[0] = ivec2(1, 0); nb[1] = ivec2(-1, 0);
@@ -150,11 +167,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         vec2 off = edge ? subOffset(i) : vec2(0.0);
         float tS; vec3 nS; int mS; vec3 posS, dirS;
         primaryHitFull(fragCoord + off, iResolution, ang, tS, nS, mS, posS, dirS);
-        float fw = tS * pixAng / max(abs(dot(nS, dirS)), 0.45);
         vec3 irr = max(col + gx * off.x + gy * off.y, 0.0);
+        vec3 alb = albC;
         bool other = (mS != mC) || (dot(nS, nC) < NORMAL_MATCH) ||
                      (tS > 0.0 && tC > 0.0 && abs(tS - tC) > 0.08 * max(tS, tC));
         if (other) {
+            // a different surface: it needs its own albedo, at its own footprint
+            vec2 fw = psrFootprint(fragCoord + off, iResolution, ang,
+                                   tS, nS, mS, posS, dirS);
+            alb = psrAlbedo(mS, posS, fw);
             // This subsample sees a different surface than the pixel centre, so
             // the centre's irradiance is the wrong number for it. Borrow from a
             // neighbour that does lie on that surface, trying the two axes and
@@ -167,7 +188,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             else if (surfaceMatches(q + d1 + d2, mS, nS))
                                                      irr = fetchC0(q + d1 + d2).rgb;
         }
-        acc += irr * psrAlbedo(mS, posS, fw);
+        acc += irr * alb;
     }
     col = acc / float(subs);
 

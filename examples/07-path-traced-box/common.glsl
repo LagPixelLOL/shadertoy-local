@@ -291,9 +291,11 @@ const vec3  CEIL_B     = vec3(0.11, 0.09, 0.18);   // near-black violet
 // Box-filtered checker: instead of point sampling the square wave (which
 // aliases into a shimmering mess towards the far wall, and would fight the
 // denoiser for the rest of the frame) this integrates it analytically over the
-// footprint fw, so distant tiles fade to their own average.
-float checker(vec2 p, float fw, float pitch) {
-    float w = max(fw, 1e-4) / pitch;
+// footprint fw -- per axis, so a surface stretched by perspective or by a lens is
+// filtered along the direction that is actually stretched -- and distant tiles
+// fade to their own average.
+float checker(vec2 p, vec2 fw, float pitch) {
+    vec2 w = max(fw, vec2(1e-4)) / pitch;
     vec2 q = p / pitch;
     vec2 i = 2.0 * (abs(fract((q - 0.5 * w) * 0.5) - 0.5)
                   - abs(fract((q + 0.5 * w) * 0.5) - 0.5)) / w;
@@ -303,7 +305,7 @@ float checker(vec2 p, float fw, float pitch) {
 // Albedo and roughness. Floor and ceiling vary with position, but every caller
 // passes both anyway: Buffer A demodulates by this value and the Image pass has
 // to reproduce it exactly, so there must be one shared definition of it.
-void materialAt(int mat, vec3 p, float fw, out vec3 alb, out float rough) {
+void materialAt(int mat, vec3 p, vec2 fw, out vec3 alb, out float rough) {
     if (mat == MAT_FLOOR) {
         // slightly glazed, so the props get a soft reflection under them
         alb = mix(FLOOR_A, FLOOR_B, checker(p.xz, fw, CHECK));
@@ -336,7 +338,7 @@ void materialAt(int mat, vec3 p, float fw, out vec3 alb, out float rough) {
 // land on -- breaks down the moment a lens is in the way, because two samples a
 // third of a pixel apart leave the glass ball pointed at different tiles. The
 // divisor becomes noise that no amount of filtering can undo.
-vec3 psrAlbedo(int mat, vec3 pos, float fw) {
+vec3 psrAlbedo(int mat, vec3 pos, vec2 fw) {
     if (mat != MAT_FLOOR && mat != MAT_CEIL && mat != MAT_BOX &&
         mat != MAT_RED && mat != MAT_GREEN &&
         mat != MAT_BLUE && mat != MAT_AMBER) return vec3(1.0);
@@ -560,6 +562,50 @@ void primaryHit(vec2 fragCoord, vec3 res, vec2 ang,
                 out float t, out vec3 n, out int mat) {
     vec3 pos, dir;
     primaryHitFull(fragCoord, res, ang, t, n, mat, pos, dir);
+}
+
+// Footprint of one pixel on the PSR surface, in metres per axis, used to filter
+// the checker. Finite-differenced from the PSR mapping itself rather than assumed.
+//
+// The obvious estimate, t * pixelAngle / cos, is a pinhole one: it is only right
+// while the primary ray travels in a straight line. The glass ball images most of
+// the room through a few hundred pixels, so behind it one pixel covers a floor
+// patch far wider than that -- measured, 2.2x wider on average and 4x at the 95th
+// percentile -- and it needs a clamp on the cosine to survive grazing angles at
+// all. Differencing the actual mapping needs no clamp and is right through any
+// number of specular bends. On flat floor, where the ray is straight and the
+// pinhole estimate should be good, the two agree to about 20%.
+//
+// Per axis, not a single scalar: the two differences span the parallelogram the
+// pixel maps to, and a separable filter wants that parallelogram's bounding box,
+// which is |du| + |dv|. That also makes the filter anisotropic, so a surface
+// stretched by perspective is blurred along the direction actually stretched.
+//
+// The fallback is only reached at a silhouette, where the neighbours land on some
+// other surface and there is no width to measure.
+vec2 psrFootprint(vec2 fragCoord, vec3 res, vec2 ang,
+                  float tC, vec3 nC, int matC, vec3 posC, vec3 dirC) {
+    float pinhole = max(tC, 0.0) * pixelAngle(res) / max(abs(dot(nC, dirC)), 0.45);
+    // centred differences: the extent of THIS pixel, rather than the offset to the
+    // next one, which matters where the mapping curves as hard as a ball lens does
+    float t1; vec3 n1; int m1; vec3 pxp, d1;
+    primaryHitFull(fragCoord + vec2(0.5, 0.0), res, ang, t1, n1, m1, pxp, d1);
+    float t2; vec3 n2; int m2; vec3 pxm, d2;
+    primaryHitFull(fragCoord - vec2(0.5, 0.0), res, ang, t2, n2, m2, pxm, d2);
+    float t3; vec3 n3; int m3; vec3 pyp, d3;
+    primaryHitFull(fragCoord + vec2(0.0, 0.5), res, ang, t3, n3, m3, pyp, d3);
+    float t4; vec3 n4; int m4; vec3 pym, d4;
+    primaryHitFull(fragCoord - vec2(0.0, 0.5), res, ang, t4, n4, m4, pym, d4);
+
+    // Both sides of an axis must land on the same surface for its difference to
+    // mean anything; at a silhouette one or both drop out.
+    vec3 du = vec3(0.0), dv = vec3(0.0);
+    if (m1 == matC && m2 == matC) du = pxp - pxm;
+    if (m3 == matC && m4 == matC) dv = pyp - pym;
+    vec2 fw = abs(du.xz) + abs(dv.xz);
+    // at a silhouette the neighbours land on other surfaces and there is no width
+    // to measure, so fall back to the pinhole estimate
+    return max(fw, vec2(dot(fw, fw) > 1e-12 ? 0.0 : pinhole));
 }
 
 // ============================================================================

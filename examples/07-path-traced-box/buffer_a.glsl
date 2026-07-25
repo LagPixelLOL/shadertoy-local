@@ -223,7 +223,7 @@ vec3 tracePath(vec2 fragCoord, vec3 res, vec2 ang, float time, int sIdx) {
         // --- matte / glazed surface -----------------------------------------
         // Footprint of this pixel on the surface (metres): grows with path
         // length and with grazing angle, which is what the checker filter needs.
-        float fw = pathLen * pixAng / max(abs(dot(h.n, rd)), 0.45);
+        vec2 fw = vec2(pathLen * pixAng / max(abs(dot(h.n, rd)), 0.45));
         vec3 alb; float rough;
         materialAt(h.mat, p, fw, alb, rough);
         vec3 v = -rd;
@@ -293,7 +293,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // with it the albedo to divide out.
     float tP; vec3 nP; int matP; vec3 posP, dirP;
     primaryHitFull(fragCoord, iResolution, cam.xy, tP, nP, matP, posP, dirP);
-    float fwP = tP * pixelAngle(iResolution) / max(abs(dot(nP, dirP)), 0.45);
+    vec2 fwP = psrFootprint(fragCoord, iResolution, cam.xy, tP, nP, matP, posP, dirP);
     vec3 albP = psrAlbedo(matP, posP, fwP);
 
     vec3 L = vec3(0.0);
