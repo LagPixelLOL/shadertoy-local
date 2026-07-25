@@ -403,6 +403,7 @@ class TestExamples:
             "03-feedback-trail",
             "04-textured",
             "05-interactive",
+            "06-portable-common",
         ],
     )
     def test_example_renders(self, name, gl_context):

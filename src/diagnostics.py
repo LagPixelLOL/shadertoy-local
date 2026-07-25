@@ -53,6 +53,28 @@ _NOISE = re.compile(
     re.IGNORECASE,
 )
 
+#: Drivers sometimes embed a second position inside the message text, e.g.
+#: NVIDIA's `conflicts with previous declaration at 0(5)`. Left alone, that
+#: leaks a composed line number into otherwise remapped output.
+_EMBEDDED_POSITION = re.compile(r"\b0\((\d+)\)")
+
+
+def _remap_embedded_positions(message: str, composed: ComposedShader | None) -> str:
+    """Rewrite ``0(N)`` references inside a message to real source locations."""
+    if composed is None or "0(" not in message:
+        return message
+
+    def replace(match: re.Match[str]) -> str:
+        line = int(match.group(1))
+        origin = composed.origin_of(line)
+        if origin is not None:
+            return f"{origin.file}:{origin.line}"
+        # Falls inside our generated prelude or wrapper; say so plainly rather
+        # than printing a number that maps to nothing the user wrote.
+        return f"<generated>:{line}"
+
+    return _EMBEDDED_POSITION.sub(replace, message)
+
 
 @dataclass
 class Diagnostic:
@@ -122,7 +144,7 @@ def parse_log(
             composed_line = int(groups["line"]) if groups.get("line") else None
             diag = Diagnostic(
                 severity=severity,
-                message=groups["msg"].strip(),
+                message=_remap_embedded_positions(groups["msg"].strip(), composed),
                 pass_name=pass_name,
                 composed_line=composed_line,
                 column=int(groups["col"]) if groups.get("col") else None,

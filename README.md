@@ -203,7 +203,51 @@ image.glsl:5: error [C1503]: undefined variable "undefined_variable"
 ```
 
 NVIDIA, Mesa and AMD log formats are all parsed, and unrecognised lines are
-surfaced rather than swallowed.
+surfaced rather than swallowed. Positions embedded in a message body (such as
+NVIDIA's `conflicts with previous declaration at 0(5)`) are remapped too.
+
+## Common-tab portability
+
+shadertoy-local concatenates `common.glsl` into every pass *after* the uniform
+prelude, so Common code may reference `iTime` and friends freely. **The real site
+does not work that way.** It validates the Common tab standalone against a
+minimal header in which only `iDate` and `iSampleRate` exist, so identical code
+shows `undeclared identifier` in the site's editor while still rendering
+correctly.
+
+That noise is cosmetic but not harmless: ~30 lines of spurious uniform errors
+will camouflage a genuine typo in Common. `shadertoy check` therefore warns about
+it **by default** (as warnings — the exit code stays 0):
+
+```
+$ shadertoy check
+common.glsl:2:41: warning [ST-COMMON]: iTime is not visible in shadertoy.com's Common tab
+ok: 1 pass(es) compiled [Image], 1 portability warning(s)
+```
+
+Disable with `--no-portable-common` if the shader will never go back to the site.
+
+Comments are ignored, and so are `#define` bodies — an unexpanded macro is never
+compiled, so the site does not flag it either. That exemption is what makes the
+recommended fix ergonomic: capture uniforms into a struct once per pass and take
+it as a parameter in Common. See `examples/06-portable-common`:
+
+```glsl
+// common.glsl -- validates clean
+struct ST { vec3 res; float time; float dt; int frame; vec4 mouse; };
+#define ST_CAPTURE ST(iResolution, iTime, iTimeDelta, iFrame, iMouse)
+float aspect(ST u) { return u.res.x / u.res.y; }
+
+// image.glsl -- uniforms read where they legally exist
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    ST u = ST_CAPTURE;
+    ...
+}
+```
+
+Do **not** try to fix it by declaring `uniform float iTime;` in Common: that
+collides with the pass's own declaration. shadertoy-local reproduces the failure
+faithfully, and tells you where the conflict is.
 
 ## Requirements
 
@@ -237,6 +281,7 @@ Each directory in `examples/` is a runnable project with its own
 | `03-feedback-trail` | Buffer feedback, and self-read vs cross-read timing |
 | `04-textured` | Builtin textures across filter/wrap modes |
 | `05-interactive` | Keyboard rows and `iMouse` |
+| `06-portable-common` | Uniform-struct protocol for a lint-clean Common tab |
 
 ```bash
 shadertoy render -C examples/03-feedback-trail --frame 120

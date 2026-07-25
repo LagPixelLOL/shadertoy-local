@@ -345,3 +345,56 @@ class TestInfo:
         code, payload, _ = run(capsys, "info", "-C", str(root), "--json")
         assert code == EXIT_OK
         assert payload["project"]["passes"]["image"]
+
+
+@pytest.mark.gpu
+class TestCommonPortability:
+    UNSAFE_COMMON = "vec3 pal() { return vec3(iTime); }\n"
+    SAFE_COMMON = "vec4 when() { return iDate; }\n"
+    IMAGE = "void mainImage(out vec4 c, in vec2 f){ c = vec4(pal(), 1.0); }\n"
+    SAFE_IMAGE = "void mainImage(out vec4 c, in vec2 f){ c = when(); }\n"
+
+    def test_warns_by_default(self, capsys, make_project):
+        root = make_project(
+            {"common.glsl": self.UNSAFE_COMMON, "image.glsl": self.IMAGE}
+        )
+        code, payload, err = run(capsys, "check", "-C", str(root), "--json")
+        assert code == EXIT_OK, "portability issues are warnings, not errors"
+        assert len(payload["portability"]) == 1
+        assert payload["portability"][0]["file"] == "common.glsl"
+        assert "iTime" in err
+
+    def test_can_be_disabled(self, capsys, make_project):
+        root = make_project(
+            {"common.glsl": self.UNSAFE_COMMON, "image.glsl": self.IMAGE}
+        )
+        code, payload, _ = run(
+            capsys, "check", "-C", str(root), "--no-portable-common", "--json"
+        )
+        assert code == EXIT_OK
+        assert payload["portability"] == []
+
+    def test_clean_common_produces_no_warnings(self, capsys, make_project):
+        root = make_project(
+            {"common.glsl": self.SAFE_COMMON, "image.glsl": self.SAFE_IMAGE}
+        )
+        code, payload, _ = run(capsys, "check", "-C", str(root), "--json")
+        assert code == EXIT_OK
+        assert payload["portability"] == []
+
+    def test_self_declaration_workaround_is_a_real_error(self, capsys, make_project):
+        """Declaring `uniform float iTime;` in Common collides with the prelude,
+        exactly as it collides with the site's own pass header."""
+        root = make_project(
+            {
+                "common.glsl": "uniform float iTime;\n" + self.UNSAFE_COMMON,
+                "image.glsl": self.IMAGE,
+            }
+        )
+        code, payload, _ = run(capsys, "check", "-C", str(root), "--json")
+        assert code == EXIT_FAILED
+        errors = [d for d in payload["diagnostics"] if d["severity"] == "error"]
+        assert errors and errors[0]["file"] == "common.glsl"
+        assert errors[0]["line"] == 1
+        # The prior declaration must not leak a raw composed line number.
+        assert "0(" not in errors[0]["message"]

@@ -1,0 +1,12 @@
+{
+  "name": "portable-common",
+  "description": "Uniform-struct protocol: keeps common.glsl clean under shadertoy.com's standalone Common validation.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "image": {
+    "channels": {}
+  }
+}

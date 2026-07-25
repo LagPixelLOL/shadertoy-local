@@ -414,6 +414,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     """Compile every pass without rendering."""
     from .context import ContextError
     from .diagnostics import format_diagnostics, summarize
+    from .portability import EXPLANATION as PORTABILITY_EXPLANATION
+    from .portability import lint_common
     from .project import ProjectError, load_project
     from .renderer import Renderer, RenderSettings
 
@@ -454,10 +456,28 @@ def cmd_check(args: argparse.Namespace) -> int:
             if text:
                 report.warn(text)
 
+        # Warn where shadertoy.com's Common tab would report undeclared
+        # identifiers. On by default: these are warnings only, and the noise
+        # they predict is what hides real typos in Common on the site.
+        portability: list = []
+        if getattr(args, "portable_common", True):
+            portability = lint_common(project)
+            for diag in portability:
+                report.warn(
+                    f"{diag.location()}: warning [{diag.code}]: {diag.message}"
+                )
+            if portability:
+                report.warn(f"note: {PORTABILITY_EXPLANATION}")
+            warnings += len(portability)
+
         ok = errors == 0
         if ok:
             names = ", ".join(s.label for s in project.ordered_passes)
-            report.say(f"ok: {len(project.ordered_passes)} pass(es) compiled [{names}]")
+            suffix = f", {len(portability)} portability warning(s)" if portability else ""
+            report.say(
+                f"ok: {len(project.ordered_passes)} pass(es) compiled "
+                f"[{names}]{suffix}"
+            )
         else:
             report.warn(f"failed: {errors} error(s), {warnings} warning(s)")
 
@@ -468,6 +488,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                 "warnings": warnings,
                 "passes": [s.name for s in project.ordered_passes],
                 "diagnostics": [d.to_dict() for d in diagnostics],
+                "portability": [d.to_dict() for d in portability],
             }
         )
         return EXIT_OK if ok else EXIT_FAILED
@@ -970,6 +991,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_project_args(check)
     _add_gpu_args(check)
+    check.add_argument(
+        "--no-portable-common",
+        dest="portable_common",
+        action="store_false",
+        default=True,
+        help=(
+            "skip the Common-tab portability check (which warns where "
+            "common.glsl references uniforms shadertoy.com reports as "
+            "undeclared; cosmetic there, but the noise hides real typos)"
+        ),
+    )
     check.set_defaults(func=cmd_check)
 
     # render

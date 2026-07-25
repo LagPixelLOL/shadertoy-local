@@ -154,3 +154,46 @@ def test_diagnostic_dict_is_serialisable():
         severity="error", message="x", file="image.glsl", line=3, composed_line=30
     )
     assert json.loads(json.dumps(diag.to_dict()))["line"] == 3
+
+
+class TestEmbeddedPositions:
+    """Drivers sometimes put a second position inside the message text, e.g.
+    NVIDIA's `conflicts with previous declaration at 0(5)`. Leaving it raw
+    leaks a composed line number into otherwise remapped output."""
+
+    def _composed(self):
+        return ComposedShader(
+            pass_name="image",
+            source="\n".join(f"line{i}" for i in range(1, 9)),
+            origins=[
+                None,
+                None,
+                Origin("common.glsl", 1),
+                Origin("common.glsl", 2),
+                Origin("image.glsl", 1),
+                None,
+                None,
+                None,
+            ],
+        )
+
+    def test_embedded_position_is_remapped(self):
+        log = '0(4) : error C1038: declaration of "iTime" conflicts with previous declaration at 0(3)'
+        (diag,) = parse_log(log, self._composed(), "image")
+        assert "common.glsl:1" in diag.message
+        assert "0(3)" not in diag.message
+
+    def test_generated_embedded_position_is_labelled(self):
+        log = "0(4) : error C1038: conflicts with previous declaration at 0(2)"
+        (diag,) = parse_log(log, self._composed(), "image")
+        assert "<generated>:2" in diag.message
+
+    def test_message_without_embedded_position_is_untouched(self):
+        log = '0(5) : error C1503: undefined variable "foo"'
+        (diag,) = parse_log(log, self._composed(), "image")
+        assert diag.message == 'undefined variable "foo"'
+
+    def test_no_composed_shader_leaves_message_alone(self):
+        log = "0(4) : error C1038: conflicts with previous declaration at 0(3)"
+        (diag,) = parse_log(log)
+        assert "0(3)" in diag.message
