@@ -159,7 +159,7 @@ TOML is validated identically, since the schema is shared.
 
 | Command | Purpose |
 |---|---|
-| `info` | GPU, EGL devices, active context, project layout; runs a verification shader on every device |
+| `info` | GPU, EGL devices, verification shader per device, and a shadertoy.com porting guide for the project |
 | `init` | Scaffold a project (`basic`, `common`, `feedback`, `input`) |
 | `check` | Compile every pass, report errors. No rendering |
 | `render` | Render frames to PNG |
@@ -479,6 +479,42 @@ apt-get install -y --no-install-recommends libegl1
 echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
   > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
 ```
+
+## Porting back to shadertoy.com
+
+`shadertoy info` reports what to actually do on the site: which tabs to create,
+what to select in each `iChannel` slot, the sampler settings, and — most usefully —
+which parts of the project **cannot** be reproduced there.
+
+```
+-- porting to shadertoy.com ---------------------------------------------
+  Tabs to create on shadertoy.com:
+    Common    common.glsl
+    Buffer A  buffer_a.glsl
+    Image     image.glsl
+
+  Channel wiring:
+    Image
+      iChannel0  Misc > Buffer A
+                filter=linear  wrap=clamp
+      iChannel1  Textures > RGBA Noise Medium
+                filter=linear  wrap=repeat  vflip=off
+                note: same role and size, but different pixel values
+
+  Cannot be reproduced as-is:
+    - Buffer A uses scale=0.5; buffers on shadertoy.com are always full resolution
+    - image.glsl uses #include; shadertoy.com has no include directive
+    - glsl_version is 430; shadertoy.com is GLSL ES 3.0, roughly equivalent to 330
+
+  Worth knowing:
+    - Buffer A is read by 2 channels; its filter and wrap are a property of the
+      buffer on the site, so set them once
+```
+
+Blockers detected: local texture files (the site has no custom texture upload),
+local-only builtins, reduced-resolution buffers, `#include`, and GLSL newer than
+ES 3.0. The whole report is in `--json` under `porting`, with a `portable` boolean.
+Skip it with `--no-porting`.
 
 ## Examples
 

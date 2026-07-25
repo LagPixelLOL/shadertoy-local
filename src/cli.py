@@ -453,21 +453,38 @@ def cmd_info(args: argparse.Namespace) -> int:
 
     try:
         project = load_project(args.directory)
-    except ProjectError:
+    except ProjectError as exc:
         payload["project"] = None
+        payload["project_error"] = str(exc)
     else:
+        from .wiring import build_report, format_report
+
+        wiring = build_report(project)
         payload["project"] = project.to_dict()
+        payload["porting"] = wiring.to_dict()
+
         report.say()
-        report.say(f"Project: {project.root}")
+        title = f"Project: {project.root}"
+        name = project.config.get("name")
+        if isinstance(name, str) and name:
+            title += f"  ({name})"
+        report.say(title)
+        report.say()
         for spec in project.ordered_passes:
             channels = ", ".join(
                 f"iChannel{i}={b.source}" for i, b in sorted(spec.channels.items())
             )
             suffix = f"  [{channels}]" if channels else ""
             scale = f" scale={spec.scale}" if spec.scale != 1.0 else ""
-            report.say(
-                f"  {spec.label:<9} {spec.path.name}{scale}{suffix}"
-            )
+            report.say(f"  {spec.label:<9} {spec.path.name}{scale}{suffix}")
+
+        if not getattr(args, "porting", True):
+            report.emit(payload)
+            return EXIT_OK
+        report.say()
+        report.say("-- porting to shadertoy.com " + "-" * 44)
+        for line in format_report(wiring):
+            report.say(line)
 
     if runtime_ok and not any(runtime_ok):
         report.warn(
@@ -1089,6 +1106,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_project_args(info)
     _add_gpu_args(info)
+    info.add_argument(
+        "--no-porting",
+        dest="porting",
+        action="store_false",
+        default=True,
+        help="omit the shadertoy.com porting guide from the project section",
+    )
     info.add_argument(
         "--no-runtime-check",
         dest="runtime_check",

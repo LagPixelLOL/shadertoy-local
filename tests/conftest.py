@@ -36,11 +36,18 @@ def gl_context():
 
 @pytest.fixture
 def make_project(tmp_path: Path):
-    """Build a throwaway project directory from a dict of files."""
+    """Build a throwaway project directory from a dict of files.
+
+    Each call gets a *fresh* directory. Reusing one would let files from an
+    earlier call leak into a later one, so a test that builds two projects to
+    compare them would silently compare contaminated inputs.
+    """
+    counter = {"n": 0}
 
     def _make(files: dict[str, str], config: dict | None = None) -> Path:
-        root = tmp_path / "proj"
-        root.mkdir(exist_ok=True)
+        counter["n"] += 1
+        root = tmp_path / f"proj{counter['n']}"
+        root.mkdir()
         for name, content in files.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
