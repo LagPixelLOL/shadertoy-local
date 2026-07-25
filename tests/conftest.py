@@ -18,6 +18,7 @@ EXAMPLES_DIR = REPO_ROOT / "examples"
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "gpu: requires a working GL context")
+    config.addinivalue_line("markers", "cpu: requires a software rasterizer")
 
 
 @pytest.fixture(scope="session")
@@ -79,3 +80,28 @@ def simple_image() -> str:
 @pytest.fixture
 def halves_image() -> str:
     return HALVES_IMAGE
+
+
+@pytest.fixture(scope="session")
+def software_context():
+    """A context on a software rasterizer (llvmpipe), for CPU-path coverage.
+
+    Worth testing for real: it exercises a completely different GLSL compiler
+    (Mesa rather than NVIDIA), which is the only way to check the diagnostic
+    parser against genuine Mesa output instead of a hand-written sample.
+    """
+    from shadertoy_local.context import (
+        ContextError,
+        create_context,
+        enumerate_devices,
+    )
+
+    software = [d for d in enumerate_devices() if d.is_software]
+    if not software:
+        pytest.skip("no software EGL device available")
+    try:
+        handle = create_context(device_index=software[0].index, allow_software=True)
+    except ContextError as exc:
+        pytest.skip(f"could not create software context: {exc}")
+    yield handle
+    handle.release()

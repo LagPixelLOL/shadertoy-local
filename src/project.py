@@ -334,10 +334,14 @@ def _parse_channel(
             raise ProjectError(
                 f"{where} reads {source!r}, but this project has no {source}.glsl"
             )
-        # Nearest is the safe default for feedback buffers; linear filtering of a
-        # buffer you are also writing tends to smear state unintentionally.
+        # Match shadertoy.com's buffer defaults exactly: linear filtering, clamp
+        # wrapping, no vertical flip. Nearest would arguably be a safer default
+        # for feedback (linear resampling of a buffer you also write to smears
+        # state), but diverging here would make a shader render differently than
+        # it does on the site, which is a worse failure for a compatibility tool
+        # than a foot-gun faithfully reproduced.
         if "filter" not in spec:
-            binding.filter = "nearest"
+            binding.filter = "linear"
         if "wrap" not in spec:
             binding.wrap = "clamp"
         if "vflip" not in spec:

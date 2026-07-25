@@ -422,3 +422,106 @@ class TestExamples:
             renderer.release()
         assert stats["finite"], f"{name} produced NaN/Inf"
         assert not stats["is_uniform"], f"{name} produced a flat frame"
+
+
+class TestBufferFiltering:
+    """Buffer sampler settings must match shadertoy.com, since a divergence
+    here changes rendered output for shaders that rely on the defaults."""
+
+    # A 2x2 checker in the buffer; the image samples exactly between texels,
+    # where linear interpolates to 0.5 and nearest snaps to a corner.
+    CHECKER = (
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    vec2 c = floor(fragCoord / (iResolution.xy / 2.0));\n"
+        "    fragColor = vec4(mod(c.x + c.y, 2.0));\n"
+        "}\n"
+    )
+    CENTRE = (
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    fragColor = texture(iChannel0, vec2(0.5));\n"
+        "}\n"
+    )
+
+    def _sample(self, make_project, gl_context, channel):
+        root = make_project(
+            {"buffer_a.glsl": self.CHECKER, "image.glsl": self.CENTRE},
+            config={
+                "buffer_a": {"scale": 0.25, "channels": {}},
+                "image": {"channels": {"0": channel}},
+            },
+        )
+        capture, renderer = _render(root, gl_context, width=64, height=64)
+        try:
+            return float(capture.images["image"][1, 1, 0])
+        finally:
+            renderer.release()
+
+    def test_default_is_linear(self, make_project, gl_context):
+        value = self._sample(
+            make_project, gl_context, {"type": "buffer", "source": "buffer_a"}
+        )
+        assert value == pytest.approx(0.5), "buffer default must interpolate"
+
+    def test_explicit_nearest_snaps(self, make_project, gl_context):
+        value = self._sample(
+            make_project,
+            gl_context,
+            {"type": "buffer", "source": "buffer_a", "filter": "nearest"},
+        )
+        assert value == pytest.approx(0.0)
+
+    def test_default_matches_explicit_linear(self, make_project, gl_context):
+        implicit = self._sample(
+            make_project, gl_context, {"type": "buffer", "source": "buffer_a"}
+        )
+        explicit = self._sample(
+            make_project,
+            gl_context,
+            {"type": "buffer", "source": "buffer_a", "filter": "linear"},
+        )
+        assert implicit == pytest.approx(explicit)
+
+    # Left half black, right half white: the top mip level averages to ~0.5,
+    # while level 0 at u=0.25 is 0.0. Forcing a high LOD distinguishes them.
+    HALVES = (
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    fragColor = vec4(fragCoord.x < iResolution.x * 0.5 ? 0.0 : 1.0);\n"
+        "}\n"
+    )
+    HIGH_LOD = (
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    fragColor = textureLod(iChannel0, vec2(0.25, 0.5), 10.0);\n"
+        "}\n"
+    )
+
+    def _high_lod(self, make_project, gl_context, filter_name):
+        root = make_project(
+            {"buffer_a.glsl": self.HALVES, "image.glsl": self.HIGH_LOD},
+            config={
+                "buffer_a": {"channels": {}},
+                "image": {
+                    "channels": {
+                        "0": {
+                            "type": "buffer",
+                            "source": "buffer_a",
+                            "filter": filter_name,
+                        }
+                    }
+                },
+            },
+        )
+        capture, renderer = _render(root, gl_context, width=64, height=64)
+        try:
+            return float(capture.images["image"][1, 1, 0])
+        finally:
+            renderer.release()
+
+    def test_mipmap_builds_a_real_pyramid(self, make_project, gl_context):
+        assert self._high_lod(make_project, gl_context, "mipmap") == pytest.approx(
+            0.5, abs=0.05
+        )
+
+    def test_linear_has_no_pyramid(self, make_project, gl_context):
+        """Without mipmaps a high LOD clamps to level 0, proving the previous
+        test is actually measuring the pyramid rather than base-level sampling."""
+        assert self._high_lod(make_project, gl_context, "linear") == pytest.approx(0.0)

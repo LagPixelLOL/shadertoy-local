@@ -11,6 +11,7 @@ import json
 import pytest
 
 from shadertoy_local.cli import (
+    EXIT_ENVIRONMENT,
     EXIT_FAILED,
     EXIT_OK,
     EXIT_USAGE,
@@ -398,3 +399,71 @@ class TestCommonPortability:
         assert errors[0]["line"] == 1
         # The prior declaration must not leak a raw composed line number.
         assert "0(" not in errors[0]["message"]
+
+
+class TestDeviceSelection:
+    """The CLI surface for choosing a renderer. `--allow-software` is routinely
+    mistaken for "render on CPU"; it only permits CPU as a fallback."""
+
+    def _renderer(self, capsys, root, *extra):
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "-r", "16x16",
+            "--no-write", "--json", *extra,
+        )
+        return code, payload
+
+    @pytest.mark.gpu
+    def test_defaults_to_hardware(self, capsys, make_project, simple_image):
+        root = make_project({"image.glsl": simple_image})
+        code, payload = self._renderer(capsys, root)
+        assert code == EXIT_OK
+        assert payload["renderer"]["software"] is False
+
+    @pytest.mark.gpu
+    def test_allow_software_does_not_override_hardware(
+        self, capsys, make_project, simple_image
+    ):
+        root = make_project({"image.glsl": simple_image})
+        code, payload = self._renderer(capsys, root, "--allow-software")
+        assert code == EXIT_OK
+        assert payload["renderer"]["software"] is False, (
+            "--allow-software must not take precedence over an available GPU"
+        )
+
+    @pytest.mark.cpu
+    def test_explicit_device_selects_software(
+        self, capsys, make_project, simple_image
+    ):
+        from shadertoy_local.context import enumerate_devices
+
+        software = [d for d in enumerate_devices() if d.is_software]
+        if not software:
+            pytest.skip("no software EGL device available")
+        root = make_project({"image.glsl": simple_image})
+        code, payload = self._renderer(capsys, root, "--device", str(software[0].index))
+        assert code == EXIT_OK
+        assert payload["renderer"]["software"] is True
+        assert payload["renderer"]["device_index"] == software[0].index
+
+    @pytest.mark.gpu
+    def test_nonexistent_device_is_a_clear_error(
+        self, capsys, make_project, simple_image
+    ):
+        root = make_project({"image.glsl": simple_image})
+        code, payload = self._renderer(capsys, root, "--device", "99")
+        assert code == EXIT_ENVIRONMENT
+        assert "does not exist" in payload["error"]
+
+    @pytest.mark.gpu
+    def test_glx_backend_fails_without_a_display(
+        self, capsys, make_project, simple_image
+    ):
+        """GLX needs an X server; the error must say so rather than be cryptic."""
+        import os
+
+        if os.environ.get("DISPLAY"):
+            pytest.skip("a display is available, so GLX may succeed")
+        root = make_project({"image.glsl": simple_image})
+        code, payload = self._renderer(capsys, root, "--backend", "glx")
+        assert code == EXIT_ENVIRONMENT
+        assert "error" in payload

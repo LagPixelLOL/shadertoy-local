@@ -30,6 +30,7 @@ from typing import Any, Iterable, Iterator
 import numpy as np
 
 from .channels import ChannelTextures
+from .context import activate
 from .compose import ComposedShader, compose_pass, vertex_source
 from .diagnostics import Diagnostic, parse_log
 from .inputs import KeyboardState, MouseState
@@ -114,6 +115,9 @@ class _Target:
     def __init__(self, ctx: Any, size: tuple[int, int], double: bool) -> None:
         self.ctx = ctx
         self.size = size
+        #: Set when some pass samples this buffer with mipmap filtering, which
+        #: requires regenerating the pyramid after every write.
+        self.needs_mipmaps = False
         self._textures = [self._make(ctx, size)]
         self._fbos = [ctx.framebuffer(color_attachments=[self._textures[0]])]
         if double:
@@ -152,6 +156,10 @@ class _Target:
     def swap(self) -> None:
         if self.double:
             self._read = 1 - self._read
+        if self.needs_mipmaps:
+            # Must happen after the swap: read_texture is the one just written,
+            # and a stale pyramid would silently serve last frame's lower levels.
+            self.read_texture.build_mipmaps()
 
     def read_array(self) -> np.ndarray:
         fbo = self._fbos[self._read] if self.double else self._fbos[0]
@@ -225,6 +233,9 @@ class Renderer:
         """
         import moderngl
 
+        # GL calls target whichever context is current; a process may hold more
+        # than one, so claim ours before touching the driver.
+        activate(self.ctx)
         version = int(self.project.default("glsl_version", 330))
         vertex = vertex_source(version)
         diagnostics: list[Diagnostic] = []
@@ -270,6 +281,15 @@ class Renderer:
             size = (max(1, int(width * scale)), max(1, int(height * scale)))
             rp.target = _Target(self.ctx, size, double=not rp.spec.is_image)
 
+        # A buffer needs mipmaps if *any* pass samples it with mipmap filtering.
+        for rp in self.passes.values():
+            for binding in rp.spec.channels.values():
+                if not binding.is_buffer or binding.filter != "mipmap":
+                    continue
+                source = self.passes.get(binding.source)
+                if source is not None and source.target is not None:
+                    source.target.needs_mipmaps = True
+
     def _ensure_geometry(self) -> None:
         if self._quad is None:
             # Full-screen triangle strip; fragCoord comes from gl_FragCoord.
@@ -303,6 +323,11 @@ class Renderer:
                 # Buffer sampling honours the binding's filter/wrap settings.
                 if binding.filter == "nearest":
                     texture.filter = (self.ctx.NEAREST, self.ctx.NEAREST)
+                elif binding.filter == "mipmap":
+                    texture.filter = (
+                        self.ctx.LINEAR_MIPMAP_LINEAR,
+                        self.ctx.LINEAR,
+                    )
                 else:
                     texture.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
                 repeat = binding.wrap == "repeat"
@@ -369,6 +394,7 @@ class Renderer:
                 f"limit of {self.settings.max_frames}. Raise --max-frames to allow it."
             )
 
+        activate(self.ctx)
         self._ensure_targets()
         self._ensure_geometry()
 
@@ -381,6 +407,9 @@ class Renderer:
         wanted_set = set(wanted)
 
         for frame in timeline:
+            # Re-claim each frame: control returned to the caller at the last
+            # yield, and it may have used a different context meanwhile.
+            activate(self.ctx)
             now = self.settings.time_at(frame)
             start = time.perf_counter()
             for rp in self.project.ordered_passes:
@@ -414,6 +443,11 @@ class Renderer:
         raise RenderError(f"frame {target} produced no output")
 
     def release(self) -> None:
+        # Freeing GL objects also requires the owning context to be current.
+        try:
+            activate(self.ctx)
+        except Exception:  # pragma: no cover - teardown is best effort
+            pass
         for vao in self._vaos.values():
             try:
                 vao.release()

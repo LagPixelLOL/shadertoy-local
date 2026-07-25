@@ -32,4 +32,5 @@ package-dir = { shadertoy_local = "src" }
 testpaths = ["tests"]
 markers = [
     "gpu: requires a working GL context (skipped when no device is available)",
+    "cpu: requires a software rasterizer (skipped when unavailable)",
 ]

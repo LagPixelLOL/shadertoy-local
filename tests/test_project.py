@@ -95,15 +95,16 @@ class TestChannelWiring:
         )
         assert 2 in load_project(root).passes["image"].channels
 
-    def test_buffer_defaults_are_feedback_safe(self, make_project, simple_image):
-        """Linear+repeat on a feedback buffer smears state; nearest+clamp is safer."""
+    def test_buffer_defaults_match_shadertoy(self, make_project, simple_image):
+        """shadertoy.com defaults buffer channels to linear + clamp, no vflip.
+        Diverging would make shaders render differently than on the site."""
         root = make_project(
             {"image.glsl": simple_image, "buffer_a.glsl": simple_image},
             config={"buffer_a": {"channels": {"0": "buffer_a"}}},
         )
         binding = load_project(root).passes["buffer_a"].channels[0]
         assert (binding.filter, binding.wrap, binding.vflip) == (
-            "nearest",
+            "linear",
             "clamp",
             False,
         )
@@ -116,7 +117,7 @@ class TestChannelWiring:
                     "channels": {
                         "0": {
                             "source": "buffer_a",
-                            "filter": "linear",
+                            "filter": "nearest",
                             "wrap": "repeat",
                         }
                     }
@@ -124,7 +125,7 @@ class TestChannelWiring:
             },
         )
         binding = load_project(root).passes["buffer_a"].channels[0]
-        assert (binding.filter, binding.wrap) == ("linear", "repeat")
+        assert (binding.filter, binding.wrap) == ("nearest", "repeat")
 
     def test_buffer_reference_to_missing_pass(self, make_project, simple_image):
         root = make_project(

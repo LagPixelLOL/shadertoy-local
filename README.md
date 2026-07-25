@@ -81,7 +81,7 @@ Shadertoy lacks.
 
 | Channel type | `source` | Notes |
 |---|---|---|
-| `buffer` | `buffer_a`..`buffer_d` | Defaults to `nearest`/`clamp`, which is safer for feedback |
+| `buffer` | `buffer_a`..`buffer_d` | Defaults to `linear`/`clamp`, no vflip — matching shadertoy.com |
 | `texture` | path relative to project root | Any format Pillow reads |
 | `builtin` | see below | Procedural, needs no asset files |
 | `keyboard` | *(none needed)* | 256x3 key state texture |

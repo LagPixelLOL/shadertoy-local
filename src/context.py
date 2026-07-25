@@ -33,6 +33,22 @@ class ContextError(RuntimeError):
     """Raised when a usable GL context cannot be created."""
 
 
+def activate(ctx: Any) -> None:
+    """Make *ctx* the current GL context.
+
+    A process may hold several contexts (comparing a GPU against a software
+    rasterizer, for instance) and GL calls land on whichever was made current
+    last. Framebuffer operations happen to survive the mismatch; program and
+    uniform operations do not, failing with errors as opaque as
+    ``invalid uniform size``.
+
+    moderngl exposes "make current" only as ``__enter__``. Its ``__exit__``
+    *unbinds* the context rather than restoring the previous one, so calling it
+    would leave no context current at all; it is deliberately never called.
+    """
+    ctx.__enter__()
+
+
 @dataclass
 class DeviceInfo:
     """A single EGL device as reported by ``eglQueryDevicesEXT``."""
@@ -79,6 +95,10 @@ class ContextHandle:
     device: DeviceInfo | None
     backend: str
     version_code: int
+
+    def activate(self) -> None:
+        """Make this context current. See :func:`activate`."""
+        activate(self.ctx)
 
     def release(self) -> None:
         try:
@@ -296,6 +316,11 @@ def create_context(
         except Exception as exc:  # noqa: BLE001 - driver errors are arbitrary
             errors.append(f"require={version}: {exc}")
             continue
+        # moderngl caches Context.info on first access, and the query reads
+        # whichever context is *current*. Touch it now, while this context is
+        # guaranteed current, or a later context would poison the cache and make
+        # to_dict() report another device's renderer entirely.
+        _ = ctx.info
         return ContextHandle(
             ctx=ctx, device=device, backend=backend, version_code=ctx.version_code
         )
