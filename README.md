@@ -86,9 +86,30 @@ Shadertoy lacks.
 | `builtin` | see below | Procedural, needs no asset files |
 | `keyboard` | *(none needed)* | 256x3 key state texture |
 
-Builtin textures are deterministic (fixed seed), so golden tests stay stable:
-`noise`, `rgba-noise`, `gray-noise`, `blue-noise`, `checker`, `uv`, `gradient`,
-`white`, `black`.
+Builtin textures are procedurally generated and deterministic (fixed seed), so
+golden tests stay stable. They fall into two groups, and the distinction matters
+for portability:
+
+**Mirror a stock shadertoy.com input** — same role and same dimensions, so a
+ported shader samples the right kind of data at the right resolution. The pixel
+values are *not* identical, since those assets cannot be redistributed:
+
+| Builtin | Size | Corresponds to |
+|---|---|---|
+| `rgba-noise-small` | 64 | RGBA Noise Small |
+| `rgba-noise-medium` (= `noise`, `rgba-noise`) | 256 | RGBA Noise Medium |
+| `gray-noise-small` | 64 | Gray Noise Small |
+| `gray-noise-medium` (= `gray-noise`) | 256 | Gray Noise Medium |
+| `blue-noise` | 1024 | Blue Noise (approximated by high-pass filtering) |
+| `bayer` | 16 | Bayer — **exact**, being defined by recurrence rather than authored |
+
+**Local-only debug aids**, with no counterpart on the site: `checker`, `uv`,
+`gradient`, `white`, `black`. Useful for checking orientation, wrapping and
+filtering, but a project using them cannot be reproduced there by binding a stock
+input.
+
+Sizes are assumed from the site's assets; override with `"size": N` on any
+builtin if one is wrong.
 
 `"0": "buffer_a"` is shorthand for the full object; `type` is inferred from
 `source` and validated when given, so a typo becomes a clear error.
@@ -206,7 +227,43 @@ NVIDIA, Mesa and AMD log formats are all parsed, and unrecognised lines are
 surfaced rather than swallowed. Positions embedded in a message body (such as
 NVIDIA's `conflicts with previous declaration at 0(5)`) are remapped too.
 
-## Common-tab portability
+## shadertoy.com portability
+
+`shadertoy check` also reports where a project would behave differently on the
+real site. Severity tracks consequence, and the two current checks differ:
+
+| Code | Severity | Because |
+|---|---|---|
+| `ST-COMMON` | warning | The shader still compiles and renders on the site; only the editor's standalone validation complains |
+| `ST-TERNARY` | **error** | The shader does not compile on the site at all |
+
+Both are on by default; `--no-portability` skips them.
+
+### ST-TERNARY: `?:` on struct types
+
+Desktop GLSL permits the ternary operator on structs and arrays, so this compiles
+here — but shadertoy.com runs WebGL, where `?:` on a struct fails to compile
+(notably through ANGLE). A clean local run would therefore be actively
+misleading, so it is reported as an **error** and fails the command:
+
+```
+$ shadertoy check
+common.glsl:5: error [ST-TERNARY]: ?: yields struct 'Ray', which does not compile on shadertoy.com; use if/else
+failed: 1 error(s), 0 warning(s)
+```
+
+The fix is mechanical and never slower:
+
+```glsl
+Ray r = flag ? a : b;              // rejected on shadertoy.com
+Ray r = b; if (flag) { r = a; }    // portable
+```
+
+Detection is heuristic — it flags a ternary whose result is a struct, via a
+struct-typed assignment target, a constructor in a branch, or a bare struct
+variable as a branch. `flag ? a.o : b.o` evaluates to a `vec3` and is left alone.
+
+### ST-COMMON: Common-tab uniform visibility
 
 shadertoy-local concatenates `common.glsl` into every pass *after* the uniform
 prelude, so Common code may reference `iTime` and friends freely. **The real site
@@ -225,7 +282,7 @@ common.glsl:2:41: warning [ST-COMMON]: iTime is not visible in shadertoy.com's C
 ok: 1 pass(es) compiled [Image], 1 portability warning(s)
 ```
 
-Disable with `--no-portable-common` if the shader will never go back to the site.
+Disable with `--no-portability` if the shader will never go back to the site.
 
 Comments are ignored, and so are `#define` bodies — an unexpanded macro is never
 compiled, so the site does not flag it either. That exemption is what makes the

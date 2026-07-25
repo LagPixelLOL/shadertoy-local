@@ -21,31 +21,37 @@ from .project import BUILTIN_TEXTURES, ChannelBinding, ProjectError
 
 #: Fixed seed so procedural textures are byte-identical across runs/machines.
 _SEED = 0x5EED1234
-#: Default edge length for generated textures.
-_BUILTIN_SIZE = 256
 
 
 def _rng() -> np.random.Generator:
     return np.random.default_rng(_SEED)
 
 
-def _noise_rgba(size: int) -> np.ndarray:
-    return _rng().integers(0, 256, size=(size, size, 4), dtype=np.uint8)
-
-
-def _noise_gray(size: int) -> np.ndarray:
-    gray = _rng().integers(0, 256, size=(size, size), dtype=np.uint8)
-    out = np.empty((size, size, 4), dtype=np.uint8)
+def _to_rgba(gray: np.ndarray) -> np.ndarray:
+    """Broadcast a single-channel uint8 image to opaque RGBA."""
+    size_y, size_x = gray.shape
+    out = np.empty((size_y, size_x, 4), dtype=np.uint8)
     out[..., 0] = out[..., 1] = out[..., 2] = gray
     out[..., 3] = 255
     return out
 
 
+def _rgba_noise(size: int) -> np.ndarray:
+    return _rng().integers(0, 256, size=(size, size, 4), dtype=np.uint8)
+
+
+def _gray_noise(size: int) -> np.ndarray:
+    return _to_rgba(_rng().integers(0, 256, size=(size, size), dtype=np.uint8))
+
+
 def _blue_noise(size: int) -> np.ndarray:
-    """A cheap high-pass-filtered noise; not true blue noise but spectrally
-    biased toward high frequencies, which is what shaders use it for."""
+    """High-pass filtered white noise.
+
+    Not true void-and-cluster blue noise, but spectrally biased toward high
+    frequencies, which is what shaders use it for. Shadertoy's own blue noise is
+    a proper generated tile, so results will differ in quality if not in kind.
+    """
     base = _rng().random((size, size), dtype=np.float32)
-    # Subtract a 3x3 box blur to suppress low frequencies.
     blur = np.zeros_like(base)
     for dy in (-1, 0, 1):
         for dx in (-1, 0, 1):
@@ -55,11 +61,30 @@ def _blue_noise(size: int) -> np.ndarray:
     high -= high.min()
     if high.max() > 0:
         high /= high.max()
-    gray = (high * 255).astype(np.uint8)
-    out = np.empty((size, size, 4), dtype=np.uint8)
-    out[..., 0] = out[..., 1] = out[..., 2] = gray
-    out[..., 3] = 255
-    return out
+    return _to_rgba((high * 255).astype(np.uint8))
+
+
+def _bayer(size: int) -> np.ndarray:
+    """An ordered-dither (Bayer) threshold matrix.
+
+    Unlike every other generator here, this one is *exact*: a Bayer matrix is
+    defined by recurrence rather than authored, so a 16x16 tile is bit-identical
+    to the one shadertoy.com ships. Built by the standard recurrence
+    ``B(2n) = [[4B+0, 4B+2], [4B+3, 4B+1]]``.
+    """
+    matrix = np.zeros((1, 1), dtype=np.int64)
+    while matrix.shape[0] < size:
+        matrix = np.block(
+            [
+                [4 * matrix + 0, 4 * matrix + 2],
+                [4 * matrix + 3, 4 * matrix + 1],
+            ]
+        )
+    matrix = matrix[:size, :size]
+    levels = matrix.max() + 1
+    # Map thresholds onto the full 0..255 range.
+    scaled = (matrix * 255 // max(1, levels - 1)).astype(np.uint8)
+    return _to_rgba(scaled)
 
 
 def _checker(size: int, cells: int = 8) -> np.ndarray:
@@ -84,10 +109,7 @@ def _uv(size: int) -> np.ndarray:
 
 def _gradient(size: int) -> np.ndarray:
     ramp = (np.arange(size, dtype=np.float32) / max(1, size - 1) * 255).astype(np.uint8)
-    out = np.empty((size, size, 4), dtype=np.uint8)
-    out[..., 0] = out[..., 1] = out[..., 2] = ramp[None, :]
-    out[..., 3] = 255
-    return out
+    return _to_rgba(np.broadcast_to(ramp[None, :], (size, size)).copy())
 
 
 def _solid(size: int, value: int) -> np.ndarray:
@@ -96,29 +118,63 @@ def _solid(size: int, value: int) -> np.ndarray:
     return out
 
 
-_GENERATORS = {
-    "noise": _noise_rgba,
-    "rgba-noise": _noise_rgba,
-    "gray-noise": _noise_gray,
-    "blue-noise": _blue_noise,
-    "checker": _checker,
-    "uv": _uv,
-    "gradient": _gradient,
-    "white": lambda size: _solid(size, 255),
-    "black": lambda size: _solid(size, 0),
+#: name -> (generator, default edge length).
+#:
+#: The first group mirrors the role and dimensions of textures shadertoy.com
+#: provides, so a shader ported from the site samples something of the right kind
+#: at the right resolution. The pixels are NOT identical -- those assets cannot
+#: be redistributed -- so ``bayer`` aside, expect different values.
+#:
+#: The second group has no counterpart on the site. They exist for local
+#: debugging, and a project using them cannot be reproduced there by binding a
+#: stock input.
+_GENERATORS: dict[str, tuple[Any, int]] = {
+    # -- approximations of shadertoy.com assets --
+    "rgba-noise-small": (_rgba_noise, 64),
+    "rgba-noise-medium": (_rgba_noise, 256),
+    "gray-noise-small": (_gray_noise, 64),
+    "gray-noise-medium": (_gray_noise, 256),
+    "blue-noise": (_blue_noise, 1024),
+    "bayer": (_bayer, 16),
+    # -- convenience aliases --
+    "noise": (_rgba_noise, 256),
+    "rgba-noise": (_rgba_noise, 256),
+    "gray-noise": (_gray_noise, 256),
+    # -- local-only debug aids (no shadertoy.com equivalent) --
+    "checker": (_checker, 256),
+    "uv": (_uv, 256),
+    "gradient": (_gradient, 256),
+    "white": (lambda size: _solid(size, 255), 8),
+    "black": (lambda size: _solid(size, 0), 8),
 }
 
+#: Builtins with no counterpart on shadertoy.com.
+LOCAL_ONLY_BUILTINS = frozenset(
+    {"checker", "uv", "gradient", "white", "black"}
+)
 
-def builtin_array(name: str, size: int = _BUILTIN_SIZE) -> np.ndarray:
-    """Generate a builtin texture as an ``(h, w, 4)`` uint8 array."""
+
+def builtin_array(name: str, size: int | None = None) -> np.ndarray:
+    """Generate a builtin texture as an ``(h, w, 4)`` uint8 array.
+
+    *size* overrides the default edge length, which is a deliberate escape hatch:
+    if one of the assumed shadertoy.com dimensions is wrong, a project can
+    correct it without waiting on a code change.
+    """
     try:
-        generator = _GENERATORS[name]
+        generator, default_size = _GENERATORS[name]
     except KeyError:
         raise ProjectError(
             f"unknown builtin texture {name!r}. Available: "
             f"{', '.join(sorted(BUILTIN_TEXTURES))}"
         ) from None
-    return generator(size)
+    return generator(int(size) if size else default_size)
+
+
+def builtin_default_size(name: str) -> int | None:
+    """Default edge length for a builtin, or ``None`` if unknown."""
+    entry = _GENERATORS.get(name)
+    return entry[1] if entry else None
 
 
 def load_image_array(path: Path) -> np.ndarray:
@@ -167,13 +223,14 @@ class ChannelTextures:
             binding.filter,
             binding.wrap,
             binding.vflip,
+            binding.size,
         )
         cached = self._cache.get(key)
         if cached is not None:
             return cached
 
         if binding.is_builtin:
-            array = builtin_array(binding.source)
+            array = builtin_array(binding.source, binding.size)
         else:
             assert binding.path is not None
             array = load_image_array(binding.path)

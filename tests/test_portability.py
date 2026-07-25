@@ -155,3 +155,162 @@ class TestShippedExamples:
                 continue
             warnings = lint_common(load_project(path))
             assert warnings == [], f"{path.name}: {[w.message for w in warnings]}"
+
+
+def _ternary(make_project, common: str = "", image: str = ""):
+    from shadertoy_local.portability import lint_struct_ternary
+
+    files = {"image.glsl": image or "void mainImage(out vec4 c, in vec2 f){ c=vec4(1.0); }\n"}
+    if common:
+        files["common.glsl"] = common
+    return lint_struct_ternary(load_project(make_project(files)))
+
+
+class TestStructTernary:
+    """shadertoy.com runs WebGL, where ?: on a struct fails to COMPILE. Unlike
+    the Common-tab check (cosmetic there), this must be an error."""
+
+    STRUCT = "struct Ray { vec3 o; vec3 d; };\n"
+
+    def test_is_an_error_not_a_warning(self, make_project):
+        image = (
+            self.STRUCT
+            + "void mainImage(out vec4 c, in vec2 f){\n"
+            "    Ray a = Ray(vec3(0.0), vec3(1.0));\n"
+            "    Ray b = Ray(vec3(1.0), vec3(0.0));\n"
+            "    Ray r = f.x > 1.0 ? a : b;\n"
+            "    c = vec4(r.o, 1.0);\n"
+            "}\n"
+        )
+        (diag,) = _ternary(make_project, image=image)
+        assert diag.severity == "error"
+        assert diag.is_error
+        assert diag.code == "ST-TERNARY"
+        assert "Ray" in diag.message
+
+    def test_detects_struct_typed_declaration(self, make_project):
+        image = (
+            self.STRUCT
+            + "void mainImage(out vec4 c, in vec2 f){\n"
+            "    Ray a, b;\n"
+            "    Ray r = f.x > 1.0 ? a : b;\n"
+            "    c = vec4(r.o, 1.0);\n"
+            "}\n"
+        )
+        assert len(_ternary(make_project, image=image)) == 1
+
+    def test_detects_constructor_branches(self, make_project):
+        image = (
+            self.STRUCT
+            + "void mainImage(out vec4 c, in vec2 f){\n"
+            "    c = vec4((f.x > 1.0 ? Ray(vec3(0.0), vec3(1.0))\n"
+            "                        : Ray(vec3(1.0), vec3(0.0))).o, 1.0);\n"
+            "}\n"
+        )
+        assert len(_ternary(make_project, image=image)) >= 1
+
+    def test_detects_return_of_bare_struct_variables(self, make_project):
+        """The usual shape, and the one needing whole-source variable types:
+        a and b are declared in the parameter list, not the return statement."""
+        common = self.STRUCT + "Ray pick(bool t, Ray a, Ray b){ return t ? a : b; }\n"
+        diagnostics = _ternary(make_project, common=common)
+        assert len(diagnostics) == 1
+        assert diagnostics[0].file == "common.glsl"
+        assert diagnostics[0].line == 2
+
+    def test_struct_declared_in_common_used_in_image(self, make_project):
+        common = self.STRUCT
+        image = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    Ray a, b;\n"
+            "    Ray r = f.x > 1.0 ? a : b;\n"
+            "    c = vec4(r.o, 1.0);\n"
+            "}\n"
+        )
+        diagnostics = _ternary(make_project, common=common, image=image)
+        assert len(diagnostics) == 1
+        assert diagnostics[0].file == "image.glsl"
+
+    # -- false positives ------------------------------------------------
+
+    def test_member_access_result_is_not_flagged(self, make_project):
+        """`t ? a.o : b.o` evaluates to vec3, which WebGL accepts."""
+        image = (
+            self.STRUCT
+            + "void mainImage(out vec4 c, in vec2 f){\n"
+            "    Ray a, b;\n"
+            "    vec3 v = f.x > 1.0 ? a.o : b.o;\n"
+            "    c = vec4(v, 1.0);\n"
+            "}\n"
+        )
+        assert _ternary(make_project, image=image) == []
+
+    def test_scalar_ternary_is_not_flagged(self, make_project):
+        image = (
+            self.STRUCT
+            + "void mainImage(out vec4 c, in vec2 f){\n"
+            "    float x = f.x > 1.0 ? 1.0 : 0.0;\n"
+            "    c = vec4(x);\n"
+            "}\n"
+        )
+        assert _ternary(make_project, image=image) == []
+
+    def test_function_name_is_not_treated_as_a_variable(self, make_project):
+        """`Ray pick(...)` declares a function; treating `pick` as struct-typed
+        would misfire on any ternary mentioning it."""
+        common = (
+            self.STRUCT
+            + "Ray build(float v){ Ray r; r.o = vec3(v); r.d = vec3(0.0); return r; }\n"
+            "float scale(bool t){ return t ? 1.0 : 2.0; }\n"
+        )
+        assert _ternary(make_project, common=common) == []
+
+    def test_no_structs_means_no_work(self, make_project):
+        image = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    c = f.x > 1.0 ? vec4(1.0) : vec4(0.0);\n"
+            "}\n"
+        )
+        assert _ternary(make_project, image=image) == []
+
+    def test_commented_out_ternary_is_ignored(self, make_project):
+        common = self.STRUCT + "// Ray r = t ? a : b;\n"
+        assert _ternary(make_project, common=common) == []
+
+    def test_shipped_examples_are_clean(self):
+        from shadertoy_local.portability import lint_struct_ternary
+        from .conftest import EXAMPLES_DIR
+
+        for path in sorted(EXAMPLES_DIR.iterdir()):
+            if not path.is_dir():
+                continue
+            found = lint_struct_ternary(load_project(path))
+            assert found == [], f"{path.name}: {[d.message for d in found]}"
+
+
+class TestSeverityDistinction:
+    """The two checks must not be conflated: one predicts cosmetic editor noise,
+    the other predicts a hard compile failure."""
+
+    def test_common_tab_stays_a_warning(self, make_project):
+        common = "float t(){ return iTime; }\n"
+        diagnostics = _lint(make_project, common)
+        assert all(d.severity == "warning" for d in diagnostics)
+        assert all(not d.is_error for d in diagnostics)
+
+    def test_lint_all_reports_both(self, make_project):
+        from shadertoy_local.portability import lint_all
+
+        common = (
+            "struct Ray { vec3 o; };\n"
+            "float t(){ return iTime; }\n"
+            "Ray pick(bool f, Ray a, Ray b){ return f ? a : b; }\n"
+        )
+        root = make_project(
+            {
+                "common.glsl": common,
+                "image.glsl": "void mainImage(out vec4 c, in vec2 f){ c=vec4(t()); }\n",
+            }
+        )
+        codes = {d.code: d.severity for d in lint_all(load_project(root))}
+        assert codes == {"ST-COMMON": "warning", "ST-TERNARY": "error"}

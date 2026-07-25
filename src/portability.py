@@ -10,7 +10,7 @@ Those diagnostics are cosmetic, but they are not harmless -- roughly thirty
 lines of uniform noise will camouflage a genuine typo in Common. This check
 therefore runs by default (as warnings, which never change the exit code) so
 Common stays clean and the site's error log stays readable. Disable it with
-``--no-portable-common``.
+``--no-portability``.
 
 The safe set below is **empirical**, derived from probing shadertoy.com: of the
 standard uniforms, only ``iDate`` and ``iSampleRate`` survive standalone Common
@@ -61,7 +61,7 @@ EXPLANATION = (
     "editor. The shader still renders correctly there -- but that noise will "
     "camouflage genuine typos in Common. To silence it, take the value as a "
     "function parameter, or fill a uniforms struct once per pass "
-    "(see examples/06-portable-common). Disable with --no-portable-common."
+    "(see examples/06-portable-common). Disable with --no-portability."
 )
 
 
@@ -172,3 +172,206 @@ def common_origin_line(project: Project, line: int) -> Origin | None:
     except ValueError:  # pragma: no cover
         display = str(project.common_path)
     return Origin(file=display, line=line)
+
+
+# --------------------------------------------------------------------------
+# Ternary on aggregate types
+# --------------------------------------------------------------------------
+
+#: Explanation for the struct-ternary check, printed once per run.
+#:
+#: Reported as an *error*, not a warning, and deliberately so. The Common-tab
+#: check predicts cosmetic editor noise around code that still compiles and
+#: renders on shadertoy.com. This one predicts an outright compile failure there,
+#: so a clean local run would otherwise be actively misleading.
+TERNARY_EXPLANATION = (
+    "Desktop GLSL permits ?: on structs and arrays, so this compiles here, but "
+    "shadertoy.com runs WebGL where it fails to compile (notably through ANGLE). "
+    "Assign with if/else instead -- always valid, and no slower. Use "
+    "--no-portability to build anyway."
+)
+
+_STRUCT_DECL = re.compile(r"\bstruct\s+([A-Za-z_]\w*)")
+
+
+def _find_struct_names(source: str) -> set[str]:
+    return set(_STRUCT_DECL.findall(source))
+
+
+def _statements(source: str) -> list[tuple[int, str]]:
+    """Split into ``(line_number, text)`` statements, tolerating line breaks.
+
+    Statement-level rather than line-level so a ternary spread over several
+    lines is still seen as one expression.
+    """
+    out: list[tuple[int, str]] = []
+    buffer: list[str] = []
+    line = 1
+    start_line = 1
+    for char in source:
+        if char in ";{}":
+            text = "".join(buffer).strip()
+            if text:
+                out.append((start_line, text))
+            buffer = []
+            start_line = line
+            continue
+        if char == "\n":
+            line += 1
+            if not "".join(buffer).strip():
+                start_line = line
+        buffer.append(char)
+    text = "".join(buffer).strip()
+    if text:
+        out.append((start_line, text))
+    return out
+
+
+def lint_struct_ternary(project: Project) -> list[Diagnostic]:
+    """Flag ``?:`` expressions whose result is a user-defined struct."""
+    sources: list[tuple[str, str]] = []
+    if project.common is not None and project.common_path is not None:
+        try:
+            display = str(project.common_path.relative_to(project.root))
+        except ValueError:  # pragma: no cover
+            display = str(project.common_path)
+        sources.append((display, project.common))
+    for spec in project.ordered_passes:
+        try:
+            display = str(spec.path.relative_to(project.root))
+        except ValueError:  # pragma: no cover
+            display = str(spec.path)
+        sources.append((display, spec.source))
+
+    # Structs may be declared in common and used in a pass, so collect globally.
+    all_text = "\n".join(strip_comments(text) for _, text in sources)
+    struct_names = _find_struct_names(all_text)
+    if not struct_names:
+        return []
+    var_types = _struct_variable_types(all_text, struct_names)
+
+    diagnostics: list[Diagnostic] = []
+    for display, text in sources:
+        cleaned = strip_comments(text)
+        for line, statement in _statements(cleaned):
+            if "?" not in statement:
+                continue
+            culprit = _struct_ternary_type(
+                statement, struct_names, var_types
+            )
+            if culprit is None:
+                continue
+            diagnostics.append(
+                Diagnostic(
+                    # An error, not a warning: this does not compile on
+                    # shadertoy.com, so passing locally would be misleading.
+                    severity="error",
+                    message=(
+                        f"?: yields struct {culprit!r}, which does not compile on "
+                        f"shadertoy.com; use if/else"
+                    ),
+                    pass_name="common" if display.startswith("common") else None,
+                    file=display,
+                    line=line,
+                    code="ST-TERNARY",
+                )
+            )
+    return diagnostics
+
+
+def _struct_variable_types(source: str, struct_names: set[str]) -> dict[str, str]:
+    """Map variable name -> struct type for the whole source.
+
+    Must be whole-source: a struct ternary typically appears in ``return flag ? a
+    : b``, where ``a`` and ``b`` were declared in the enclosing function's
+    parameter list -- a different statement entirely.
+
+    Function *names* are excluded: ``Ray pick(...)`` declares a function, not a
+    variable, and treating ``pick`` as struct-typed would invite false positives.
+    """
+    types: dict[str, str] = {}
+    for name in struct_names:
+        for match in re.finditer(rf"\b{re.escape(name)}\s+([A-Za-z_]\w*)", source):
+            tail = source[match.end() :].lstrip()
+            if tail.startswith("("):
+                continue
+            types[match.group(1)] = name
+    return types
+
+
+def _split_ternary(statement: str, start: int) -> tuple[str, str] | None:
+    """Given the index of a ``?``, return its two branch texts.
+
+    Tracks bracket depth and nested ``?:`` so the matching colon is found rather
+    than merely the next one.
+    """
+    depth = 0
+    pending = 0
+    for index in range(start + 1, len(statement)):
+        char = statement[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0:
+            if char == "?":
+                pending += 1
+            elif char == ":":
+                if pending:
+                    pending -= 1
+                else:
+                    return statement[start + 1 : index], statement[index + 1 :]
+    return None
+
+
+def _struct_ternary_type(
+    statement: str, struct_names: set[str], var_types: dict[str, str]
+) -> str | None:
+    """Return the struct a ternary evaluates to, or None.
+
+    Three signals are trusted, all cheap and low on false positives:
+
+    1. the statement declares or assigns a struct-typed variable and contains
+       ``?``, e.g. ``ST u = flag ? a : b``;
+    2. a branch constructs a struct, e.g. ``flag ? ST(1.0) : ST(2.0)``;
+    3. a branch is a *bare* struct-typed variable, e.g. ``return flag ? a : b``,
+       which is how a struct ternary usually appears inside a function.
+
+    A struct merely *mentioned* is deliberately not enough: ``flag ? s.v : 0.0``
+    evaluates to a float, and flagging it would be wrong.
+    """
+    for name in sorted(struct_names, key=len, reverse=True):
+        # (1) declaration or assignment whose target is of struct type.
+        if re.search(rf"\b{re.escape(name)}\s+[A-Za-z_]\w*\s*=[^=]", statement):
+            return name
+
+    for position, char in enumerate(statement):
+        if char != "?":
+            continue
+        branches = _split_ternary(statement, position)
+        if branches is None:
+            continue
+        for branch in branches:
+            text = branch.strip().rstrip(";").strip()
+            # (2) a struct constructor.
+            for name in struct_names:
+                if re.match(rf"^{re.escape(name)}\s*\(", text):
+                    return name
+            # (3) a bare struct-typed variable (no member access or indexing).
+            if re.fullmatch(r"[A-Za-z_]\w*", text) and text in var_types:
+                return var_types[text]
+    return None
+
+
+def lint_all(project: Project) -> list[Diagnostic]:
+    """Every portability check, in reporting order."""
+    return [*lint_common(project), *lint_struct_ternary(project)]
+
+
+#: Footers to print, keyed by the diagnostic code that triggers them.
+EXPLANATIONS = {
+    "ST-COMMON": EXPLANATION,
+    "ST-TERNARY": TERNARY_EXPLANATION,
+}

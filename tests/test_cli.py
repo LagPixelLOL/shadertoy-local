@@ -370,7 +370,7 @@ class TestCommonPortability:
             {"common.glsl": self.UNSAFE_COMMON, "image.glsl": self.IMAGE}
         )
         code, payload, _ = run(
-            capsys, "check", "-C", str(root), "--no-portable-common", "--json"
+            capsys, "check", "-C", str(root), "--no-portability", "--json"
         )
         assert code == EXIT_OK
         assert payload["portability"] == []
@@ -469,3 +469,74 @@ class TestDeviceSelection:
         code, payload = self._renderer(capsys, root, "--backend", "glx")
         assert code == EXIT_ENVIRONMENT
         assert "error" in payload
+
+
+@pytest.mark.gpu
+class TestStructTernaryFailsHard:
+    """A struct ternary compiles locally but not on shadertoy.com, so `check`
+    must fail rather than merely warn."""
+
+    SOURCE = (
+        "struct Ray { vec3 o; vec3 d; };\n"
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    Ray a = Ray(vec3(0.0), vec3(1.0));\n"
+        "    Ray b = Ray(vec3(1.0), vec3(0.0));\n"
+        "    Ray r = fragCoord.x > 1.0 ? a : b;\n"
+        "    fragColor = vec4(r.o, 1.0);\n"
+        "}\n"
+    )
+    PORTABLE = (
+        "struct Ray { vec3 o; vec3 d; };\n"
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    Ray a = Ray(vec3(0.0), vec3(1.0));\n"
+        "    Ray b = Ray(vec3(1.0), vec3(0.0));\n"
+        "    Ray r = b;\n"
+        "    if (fragCoord.x > 1.0) { r = a; }\n"
+        "    fragColor = vec4(r.o, 1.0);\n"
+        "}\n"
+    )
+
+    def test_check_fails_with_exit_1(self, capsys, make_project):
+        root = make_project({"image.glsl": self.SOURCE})
+        code, payload, err = run(capsys, "check", "-C", str(root), "--json")
+        assert code == EXIT_FAILED
+        assert payload["ok"] is False
+        assert payload["errors"] >= 1
+        entry = payload["portability"][0]
+        assert entry["severity"] == "error"
+        assert entry["code"] == "ST-TERNARY"
+        assert entry["file"] == "image.glsl"
+        assert entry["line"] == 5
+        assert "ST-TERNARY" in err
+
+    def test_it_still_compiles_locally(self, capsys, make_project):
+        """Proof the failure is a portability judgement, not a compile error:
+        the desktop driver accepts this happily."""
+        root = make_project({"image.glsl": self.SOURCE})
+        code, payload, _ = run(
+            capsys, "check", "-C", str(root), "--no-portability", "--json"
+        )
+        assert code == EXIT_OK
+        assert payload["errors"] == 0
+
+    def test_portable_rewrite_passes(self, capsys, make_project):
+        root = make_project({"image.glsl": self.PORTABLE})
+        code, payload, _ = run(capsys, "check", "-C", str(root), "--json")
+        assert code == EXIT_OK
+        assert payload["portability"] == []
+
+    def test_common_tab_warning_does_not_fail_the_command(
+        self, capsys, make_project
+    ):
+        """Contrast: the Common-tab finding is cosmetic on the site, so it warns
+        without failing."""
+        root = make_project(
+            {
+                "common.glsl": "vec3 pal(){ return vec3(iTime); }\n",
+                "image.glsl": "void mainImage(out vec4 c, in vec2 f){ c=vec4(pal(),1.0); }\n",
+            }
+        )
+        code, payload, _ = run(capsys, "check", "-C", str(root), "--json")
+        assert code == EXIT_OK
+        assert payload["warnings"] >= 1
+        assert payload["errors"] == 0

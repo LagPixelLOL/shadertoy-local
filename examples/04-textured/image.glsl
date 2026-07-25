@@ -1,17 +1,29 @@
-// Texture channels. This project binds three different builtin textures, so
-// it needs no asset files and renders identically on any machine.
+// Channel inputs, and which of them exist on shadertoy.com.
 //
-//   iChannel0 = checker      (nearest, repeat)  - shows wrapping and filtering
-//   iChannel1 = uv           (linear,  clamp )  - red = u, green = v
-//   iChannel2 = noise        (linear,  repeat)  - deterministic RGBA noise
+// Four strips, left to right:
+//
+//   iChannel0  textures/pattern.png   a real file -- the PORTABLE way to supply
+//                                     a texture. On shadertoy.com you would
+//                                     upload it or pick a stock texture.
+//   iChannel1  rgba-noise-medium      mirrors the site's "RGBA Noise Medium"
+//                                     (256x256). Same role and size; the actual
+//                                     pixel values differ, because Shadertoy's
+//                                     assets cannot be redistributed.
+//   iChannel2  bayer                  a 16x16 ordered-dither matrix. This one is
+//                                     EXACT: a Bayer matrix is defined by
+//                                     recurrence, not authored, so it is
+//                                     identical to the site's.
+//   iChannel3  uv                     a shadertoy-local debug aid with NO
+//                                     equivalent on the site. Red = u, green = v,
+//                                     which makes orientation and wrap mode
+//                                     obvious at a glance.
 //
 // iChannelResolution[N] holds each channel's pixel size.
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
 
-    // Three vertical strips, one per channel.
-    float strip = floor(uv.x * 3.0);
-    vec2 local = vec2(fract(uv.x * 3.0), uv.y);
+    float strip = floor(uv.x * 4.0);
+    vec2 local = vec2(fract(uv.x * 4.0), uv.y);
 
     // Scroll and zoom so wrapping behaviour is visible.
     vec2 st = local * 2.0 + vec2(iTime * 0.1, 0.0);
@@ -20,10 +32,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     if (strip < 0.5) {
         col = texture(iChannel0, st).rgb;
     } else if (strip < 1.5) {
-        // Clamped: sampling beyond [0,1] repeats the edge pixel.
         col = texture(iChannel1, st).rgb;
+    } else if (strip < 2.5) {
+        // Ordered dithering, the reason a Bayer texture exists. Quantise a
+        // smooth ramp to 3 levels using the matrix as a threshold.
+        float ramp = local.y;
+        float threshold = texelFetch(iChannel2, ivec2(fragCoord) % 16, 0).r;
+        col = vec3(floor(ramp * 3.0 + threshold) / 3.0);
     } else {
-        col = texture(iChannel2, st).rgb;
+        col = texture(iChannel3, st).rgb;
     }
 
     // Thin dividers between strips.

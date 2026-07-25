@@ -73,18 +73,38 @@ CONFIG_NAMES = (
 #: Procedural channel sources that need no asset files. Keeping these built in
 #: means projects stay self-contained and tests stay reproducible; Shadertoy's
 #: own texture assets cannot be redistributed.
-BUILTIN_TEXTURES = (
+#: Procedural channel sources that need no asset files.
+#:
+#: The first group mirrors the role and dimensions of stock shadertoy.com inputs
+#: so a ported shader samples the right kind of data at the right resolution; the
+#: pixels differ, since those assets cannot be redistributed. ``bayer`` is the
+#: exception and matches exactly, an ordered-dither matrix being defined by
+#: recurrence rather than authored.
+#:
+#: The second group is local-only: useful for debugging, but with no stock input
+#: on the site that reproduces them.
+SHADERTOY_LIKE_BUILTINS = (
+    "rgba-noise-small",
+    "rgba-noise-medium",
+    "gray-noise-small",
+    "gray-noise-medium",
+    "blue-noise",
+    "bayer",
     "noise",
     "rgba-noise",
     "gray-noise",
-    "blue-noise",
+)
+
+LOCAL_ONLY_BUILTINS = (
     "checker",
     "uv",
     "gradient",
     "white",
     "black",
-    "keyboard",
 )
+
+BUILTIN_TEXTURES = (*SHADERTOY_LIKE_BUILTINS, *LOCAL_ONLY_BUILTINS, "keyboard")
+
 
 _FILTERS = ("nearest", "linear", "mipmap")
 _WRAPS = ("clamp", "repeat")
@@ -108,6 +128,8 @@ class ChannelBinding:
     vflip: bool = True
     #: Resolved asset path for file-backed sources.
     path: Path | None = None
+    #: Edge length override for builtin sources; None uses the builtin default.
+    size: int | None = None
 
     @property
     def is_buffer(self) -> bool:
@@ -129,6 +151,7 @@ class ChannelBinding:
             "wrap": self.wrap,
             "vflip": self.vflip,
             "path": str(self.path) if self.path else None,
+            "size": self.size,
         }
 
 
@@ -312,12 +335,22 @@ def _parse_channel(
                     f"{inferred} name. Rename the file or set type to {inferred!r}."
                 )
 
+    size = spec.get("size")
+    if size is not None:
+        if kind != "builtin":
+            raise ProjectError(
+                f'{where}: "size" only applies to builtin sources, not {kind!r}'
+            )
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise ProjectError(f'{where}: "size" must be a positive integer')
+
     binding = ChannelBinding(
         source=source,
         kind=kind,
         filter=str(spec.get("filter", "linear")).lower(),
         wrap=str(spec.get("wrap", "repeat")).lower(),
         vflip=bool(spec.get("vflip", True)),
+        size=size,
     )
     if binding.filter not in _FILTERS:
         raise ProjectError(

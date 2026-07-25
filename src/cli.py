@@ -414,8 +414,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     """Compile every pass without rendering."""
     from .context import ContextError
     from .diagnostics import format_diagnostics, summarize
-    from .portability import EXPLANATION as PORTABILITY_EXPLANATION
-    from .portability import lint_common
+    from .portability import EXPLANATIONS, lint_all
     from .project import ProjectError, load_project
     from .renderer import Renderer, RenderSettings
 
@@ -456,19 +455,27 @@ def cmd_check(args: argparse.Namespace) -> int:
             if text:
                 report.warn(text)
 
-        # Warn where shadertoy.com's Common tab would report undeclared
-        # identifiers. On by default: these are warnings only, and the noise
-        # they predict is what hides real typos in Common on the site.
+        # Warn where this project would behave differently on shadertoy.com.
+        # On by default: warnings only, and each predicts a real divergence that
+        # compiles cleanly here.
         portability: list = []
-        if getattr(args, "portable_common", True):
-            portability = lint_common(project)
+        if getattr(args, "portability", True):
+            portability = lint_all(project)
             for diag in portability:
                 report.warn(
-                    f"{diag.location()}: warning [{diag.code}]: {diag.message}"
+                    f"{diag.location()}: {diag.severity} [{diag.code}]: "
+                    f"{diag.message}"
                 )
-            if portability:
-                report.warn(f"note: {PORTABILITY_EXPLANATION}")
-            warnings += len(portability)
+            # One footer per distinct check that fired, not per occurrence.
+            for code in dict.fromkeys(d.code for d in portability):
+                note = EXPLANATIONS.get(code)
+                if note:
+                    report.warn(f"note [{code}]: {note}")
+            # Severity reflects consequence: a Common-tab finding is cosmetic on
+            # the site, a struct ternary does not compile there at all, so it
+            # counts as an error and fails the command.
+            errors += sum(1 for d in portability if d.is_error)
+            warnings += sum(1 for d in portability if not d.is_error)
 
         ok = errors == 0
         if ok:
@@ -992,14 +999,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_args(check)
     _add_gpu_args(check)
     check.add_argument(
-        "--no-portable-common",
-        dest="portable_common",
+        "--no-portability",
+        dest="portability",
         action="store_false",
         default=True,
         help=(
-            "skip the Common-tab portability check (which warns where "
-            "common.glsl references uniforms shadertoy.com reports as "
-            "undeclared; cosmetic there, but the noise hides real typos)"
+            "skip shadertoy.com portability checks: Common-tab uniform "
+            "visibility, and ?: on struct types (both compile here but diverge "
+            "on the site)"
         ),
     )
     check.set_defaults(func=cmd_check)
