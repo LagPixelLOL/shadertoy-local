@@ -33,7 +33,7 @@ from .channels import ChannelTextures
 from .context import activate
 from .compose import ComposedShader, compose_pass, vertex_source
 from .diagnostics import Diagnostic, parse_log
-from .inputs import KeyboardState, MouseState
+from .inputs import InputState, InputTimeline
 from .project import PassSpec, Project
 
 #: Refuse to simulate more than this many frames without an explicit opt-in.
@@ -68,8 +68,8 @@ class RenderSettings:
     frame: int = 0
     #: Explicit ``iTime`` override; when None, derived from frame/fps.
     time: float | None = None
-    mouse: MouseState = field(default_factory=MouseState)
-    keyboard: KeyboardState = field(default_factory=KeyboardState)
+    #: One timeline covering pointer and keyboard together, evaluated per frame.
+    inputs: InputTimeline = field(default_factory=InputTimeline.empty)
     date: tuple[float, float, float, float] = DEFAULT_DATE
     sample_rate: float = 44100.0
     #: None = decide automatically from whether the project has buffers.
@@ -91,8 +91,7 @@ class RenderSettings:
             "fps": self.fps,
             "frame": self.frame,
             "time": self.time,
-            "mouse": self.mouse.to_dict(),
-            "keyboard": self.keyboard.to_dict(),
+            "inputs": self.inputs.to_dict(),
             "date": list(self.date),
         }
 
@@ -315,7 +314,9 @@ class Renderer:
 
     # -- rendering -------------------------------------------------------
 
-    def _bind_channels(self, rp: _Pass, frame: int) -> list[tuple[int, int, int]]:
+    def _bind_channels(
+        self, rp: _Pass, frame: int, state: InputState
+    ) -> list[tuple[int, int, int]]:
         """Bind this pass's channels; returns per-channel (w, h, depth)."""
         resolutions = [(0, 0, 0)] * 4
         for index in range(4):
@@ -345,7 +346,7 @@ class Renderer:
                 texture.repeat_y = repeat
                 size = source.target.size
             elif binding.is_keyboard:
-                texture = self.channels.keyboard(self.settings.keyboard, frame)
+                texture = self.channels.keyboard(state)
                 size = texture.size
             else:
                 texture = self.channels.get(binding)
@@ -356,7 +357,12 @@ class Renderer:
         return resolutions
 
     def _set_frame_uniforms(
-        self, rp: _Pass, frame: int, now: float, resolutions: list[tuple[int, int, int]]
+        self,
+        rp: _Pass,
+        frame: int,
+        now: float,
+        resolutions: list[tuple[int, int, int]],
+        state: InputState,
     ) -> None:
         target = rp.target
         assert target is not None
@@ -369,11 +375,7 @@ class Renderer:
         _set_uniform(program, "iFrame", int(frame))
         _set_uniform(program, "iSampleRate", float(self.settings.sample_rate))
         _set_uniform(program, "iDate", tuple(float(v) for v in self.settings.date))
-        _set_uniform(
-            program,
-            "iMouse",
-            self.settings.mouse.as_vec4(width, height, frame),
-        )
+        _set_uniform(program, "iMouse", state.mouse_vec4(width, height, frame))
         _set_uniform(program, "iChannelTime", [now] * 4)
         _set_uniform(
             program,
@@ -421,13 +423,17 @@ class Renderer:
             # yield, and it may have used a different context meanwhile.
             activate(self.ctx)
             now = self.settings.time_at(frame)
+            # One evaluation per frame, shared by every pass in it.
+            state = self.settings.inputs.state_at(frame)
             start = time.perf_counter()
             for rp in self.project.ordered_passes:
                 compiled = self.passes.get(rp.name)
                 if compiled is None or compiled.target is None:
                     continue
-                resolutions = self._bind_channels(compiled, frame)
-                self._set_frame_uniforms(compiled, frame, now, resolutions)
+                resolutions = self._bind_channels(compiled, frame, state)
+                self._set_frame_uniforms(
+                    compiled, frame, now, resolutions, state
+                )
                 compiled.target.write_fbo.use()
                 self._vaos[rp.name].render(mode=self.ctx.TRIANGLE_STRIP)
                 # Swap now so later passes in this frame observe fresh output.

@@ -147,29 +147,67 @@ directly. Override with `--simulate` / `--no-simulate`.
 
 ## Simulated input
 
-No window, no real devices — input is supplied as arguments and is fully
-reproducible.
+No window and no real devices: input is a **single timeline of operations**
+covering pointer and keyboard together, so a drag, a click-and-release, or a key
+pressed at one specific frame is expressible and reproducible.
 
 ```bash
-shadertoy render --mouse 320,180                  # held at a position
-shadertoy render --mouse 0.5,0.5 --mouse-norm     # fractions of resolution
-shadertoy render --mouse 320,180 --mouse-button click
-shadertoy render --key w,a --key-press space --key-toggle g
+shadertoy render --input input.json --frame 80
+shadertoy render --input '[{"frame":0,"op":"mouse_down","pos":[320,180]}]'
+cat ops.json | shadertoy render --input -
+shadertoy render --help-input        # full operation reference
 ```
 
-`iMouse` follows Shadertoy's sign encoding: `xy` is the cursor, `abs(zw)` is
-where the click began, `z > 0` means held, `w > 0` means this is the press
-frame.
+Each operation is scheduled by **`frame` or `time`** — frames when reasoning about
+simulation steps, seconds when matching what the shader does with `iTime` (times
+are converted with `--fps`, rounding to nearest):
 
-The keyboard is a 256x3 texture indexed by JavaScript key code:
+```json
+[
+  {"frame": 0,   "op": "mouse_down", "pos": [320, 180]},
+  {"frame": 30,  "op": "mouse_move", "pos": [500, 180]},
+  {"time":  1.0, "op": "key_down",   "keys": ["w", "shift"]},
+  {"frame": 75,  "op": "key_tap",    "keys": ["space"]},
+  {"frame": 90,  "op": "mouse_up"},
+  {"frame": 95,  "op": "key_up",     "keys": ["w", "shift"]}
+]
+```
+
+| Operation | Effect |
+|---|---|
+| `mouse_down` | Press the button; optional `pos`. Sets the click anchor |
+| `mouse_up` | Release; optional `pos` |
+| `mouse_move` | Move the cursor; requires `pos` |
+| `key_down` | Hold keys until a matching `key_up` |
+| `key_up` | Release keys |
+| `key_tap` | Hold for exactly that one frame |
+| `key_toggle` | Flip the toggle row |
+| `key_untoggle` | Clear the toggle row |
+
+`pos` is in pixels, or fractions of the resolution with `"normalized": true`.
+`keys` accepts names or numeric JavaScript key codes: `w`, `space`, `left`, `f1`,
+`numpad0`, `27`.
+
+Operations **need not be written in temporal order** — grouping a keypress next to
+the drag it accompanies is often clearer. The list is sorted on construction, and
+sorting is *stable*, so operations sharing a frame apply in written order
+(`mouse_down` then `mouse_move` anchors the click at the press position; the
+reverse anchors it at the moved one).
+
+In the shader:
 
 ```glsl
-float held    = texelFetch(iChannel0, ivec2(87, 0), 0).x;  // row 0: held
-float pressed = texelFetch(iChannel0, ivec2(87, 1), 0).x;  // row 1: pressed
-float toggled = texelFetch(iChannel0, ivec2(87, 2), 0).x;  // row 2: toggle
+iMouse.xy                              // cursor in pixels
+iMouse.z > 0.0                         // button held
+iMouse.w > 0.0                         // this is the frame of the press
+abs(iMouse.zw)                         // where the press began
+texelFetch(iChannel0, ivec2(87,0),0).x // key held      (row 0)
+texelFetch(iChannel0, ivec2(87,1),0).x // pressed now   (row 1)
+texelFetch(iChannel0, ivec2(87,2),0).x // toggle        (row 2)
 ```
 
-Keys accept names or codes: `w`, `space`, `left`, `f1`, `numpad0`, `27`.
+`examples/05-interactive/input.json` is a working timeline; render it at various
+frames to watch the state evolve.
 
 ## Verifying output without looking at it
 

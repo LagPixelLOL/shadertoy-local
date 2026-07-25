@@ -106,7 +106,7 @@ class TestSoftwareRendering:
         assert values == {0: 1.0, 1: 2.0, 2: 3.0, 3: 4.0}
 
     def test_keyboard_channel_works_on_cpu(self, make_project, software_context):
-        from shadertoy_local.inputs import KeyboardState
+        from shadertoy_local.inputs import InputTimeline
 
         source = (
             "void mainImage(out vec4 c, in vec2 f){\n"
@@ -118,7 +118,11 @@ class TestSoftwareRendering:
             config={"image": {"channels": {"0": {"type": "keyboard"}}}},
         )
         capture, renderer = _render(
-            root, software_context, keyboard=KeyboardState.from_spec(keys=["space"])
+            root,
+            software_context,
+            inputs=InputTimeline.from_spec(
+                [{"frame": 0, "op": "key_down", "keys": ["space"]}]
+            ),
         )
         try:
             assert capture.images["image"][0, 0, 0] == pytest.approx(1.0)

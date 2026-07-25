@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from shadertoy_local.inputs import KeyboardState, MouseState
+from shadertoy_local.inputs import InputTimeline
 from shadertoy_local.project import load_project
 from shadertoy_local.renderer import (
     Renderer,
@@ -214,7 +214,9 @@ class TestUniforms:
         capture, renderer = _render(
             make_project({"image.glsl": source}),
             gl_context,
-            mouse=MouseState.from_spec(position="25,50"),
+            inputs=InputTimeline.from_spec(
+                [{"frame": 0, "op": "mouse_down", "pos": [25, 50]}]
+            ),
         )
         try:
             pixel = capture.images["image"][0, 0]
@@ -253,38 +255,62 @@ class TestKeyboardChannel:
         "}\n"
     )
 
-    def _pixel(self, make_project, gl_context, keyboard):
+    def _pixel(self, make_project, gl_context, ops, frame=0):
         root = make_project(
             {"image.glsl": self.SOURCE},
             config={"image": {"channels": {"0": {"type": "keyboard"}}}},
         )
-        capture, renderer = _render(root, gl_context, keyboard=keyboard)
+        capture, renderer = _render(
+            root, gl_context, inputs=InputTimeline.from_spec(ops), frame=frame
+        )
         try:
             return capture.images["image"][0, 0]
         finally:
             renderer.release()
 
     def test_nothing_pressed(self, make_project, gl_context):
-        pixel = self._pixel(make_project, gl_context, KeyboardState())
+        pixel = self._pixel(make_project, gl_context, [])
         assert list(pixel[:3]) == pytest.approx([0.0, 0.0, 0.0])
 
-    def test_held_key(self, make_project, gl_context):
+    def test_held_but_not_pressed_on_a_later_frame(self, make_project, gl_context):
+        """Row 1 is 'pressed this frame', so by frame 3 the key is only held.
+        This distinction was impossible to express before the timeline."""
         pixel = self._pixel(
-            make_project, gl_context, KeyboardState.from_spec(keys=["space"])
+            make_project,
+            gl_context,
+            [{"frame": 0, "op": "key_down", "keys": ["space"]}],
+            frame=3,
         )
-        assert pixel[0] == pytest.approx(1.0)
-        assert pixel[1] == pytest.approx(0.0)
+        assert pixel[0] == pytest.approx(1.0), "should still be held"
+        assert pixel[1] == pytest.approx(0.0), "should not be pressed-this-frame"
 
-    def test_pressed_key(self, make_project, gl_context):
+    def test_pressed_on_the_event_frame(self, make_project, gl_context):
         pixel = self._pixel(
-            make_project, gl_context, KeyboardState.from_spec(press=["space"])
+            make_project,
+            gl_context,
+            [{"frame": 2, "op": "key_down", "keys": ["space"]}],
+            frame=2,
         )
         assert pixel[0] == pytest.approx(1.0)
         assert pixel[1] == pytest.approx(1.0)
 
+    def test_released_key_is_gone(self, make_project, gl_context):
+        pixel = self._pixel(
+            make_project,
+            gl_context,
+            [
+                {"frame": 0, "op": "key_down", "keys": ["space"]},
+                {"frame": 2, "op": "key_up", "keys": ["space"]},
+            ],
+            frame=4,
+        )
+        assert pixel[0] == pytest.approx(0.0)
+
     def test_toggled_key(self, make_project, gl_context):
         pixel = self._pixel(
-            make_project, gl_context, KeyboardState.from_spec(toggle=["w"])
+            make_project,
+            gl_context,
+            [{"frame": 0, "op": "key_toggle", "keys": ["w"]}],
         )
         assert pixel[2] == pytest.approx(1.0)
 
@@ -422,8 +448,11 @@ class TestExamples:
         root = EXAMPLES_DIR / name
         capture, renderer = _render(
             root, gl_context, width=96, height=64, frame=30,
-            mouse=MouseState.from_spec(position="48,32"),
-            keyboard=KeyboardState.from_spec(keys=["space"], toggle=["g"]),
+            inputs=InputTimeline.from_spec([
+                {"frame": 0, "op": "mouse_down", "pos": [48, 32]},
+                {"frame": 0, "op": "key_down", "keys": ["space"]},
+                {"frame": 0, "op": "key_toggle", "keys": ["g"]},
+            ]),
         )
         try:
             stats = frame_stats(capture.images["image"])

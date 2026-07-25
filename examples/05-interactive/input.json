@@ -1,0 +1,9 @@
+[
+  {"frame": 0,   "op": "key_toggle", "keys": ["g"]},
+  {"frame": 10,  "op": "mouse_down", "pos": [180, 90]},
+  {"frame": 40,  "op": "mouse_move", "pos": [420, 240]},
+  {"time":  1.0, "op": "key_down",   "keys": ["right"]},
+  {"frame": 75,  "op": "key_tap",    "keys": ["space"]},
+  {"frame": 90,  "op": "mouse_up"},
+  {"frame": 95,  "op": "key_up",     "keys": ["right"]}
+]

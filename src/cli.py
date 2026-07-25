@@ -150,46 +150,68 @@ def _add_frame_args(parser: argparse.ArgumentParser) -> None:
 def _add_input_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("simulated input")
     group.add_argument(
-        "--mouse", default=None, metavar="X,Y", help="cursor position in pixels"
+        "--input",
+        dest="input_spec",
+        default=None,
+        metavar="SPEC",
+        help=(
+            "simulated pointer and keyboard input: a JSON array of operations, "
+            "given inline, as a file path, or '-' for stdin. Each operation takes "
+            "a \"frame\" or \"time\" plus an \"op\" of "
+            "mouse_down/mouse_up/mouse_move/key_down/key_up/key_tap/"
+            "key_toggle/key_untoggle. See --help-input."
+        ),
     )
     group.add_argument(
-        "--mouse-norm",
+        "--help-input",
         action="store_true",
-        help="treat mouse coordinates as fractions of the resolution",
+        help="print the input operation format with examples, then exit",
     )
-    group.add_argument(
-        "--mouse-button",
-        default=None,
-        choices=("up", "down", "click"),
-        help="button state (default: down when --mouse is given)",
-    )
-    group.add_argument(
-        "--mouse-click",
-        default=None,
-        metavar="X,Y",
-        help="position where the click began (default: same as --mouse)",
-    )
-    group.add_argument(
-        "--key",
-        action="append",
-        default=[],
-        metavar="KEY",
-        help="key held down; repeatable or comma-separated (e.g. --key w,a)",
-    )
-    group.add_argument(
-        "--key-press",
-        action="append",
-        default=[],
-        metavar="KEY",
-        help="key pressed on the first frame (also counts as held)",
-    )
-    group.add_argument(
-        "--key-toggle",
-        action="append",
-        default=[],
-        metavar="KEY",
-        help="key whose toggle row is set",
-    )
+
+
+INPUT_HELP = """\
+Simulated input is one ordered list of operations covering pointer and keyboard
+together. Pass it with --input, as inline JSON, a file path, or '-' for stdin.
+
+Each operation needs:
+
+  "frame": N   or   "time": SECONDS     when it happens (time uses --fps)
+  "op": ...                             what happens
+
+Operations:
+
+  mouse_down    press the button; takes an optional "pos"
+  mouse_up      release the button; takes an optional "pos"
+  mouse_move    move the cursor; requires "pos"
+  key_down      hold keys until a matching key_up; requires "keys"
+  key_up        release keys; requires "keys"
+  key_tap       hold keys for exactly this one frame; requires "keys"
+  key_toggle    flip the toggle row for keys; requires "keys"
+  key_untoggle  clear the toggle row for keys; requires "keys"
+
+  "pos": [x, y]           pixels, or fractions with "normalized": true
+  "keys": ["w", "space"]  names or numeric JavaScript key codes
+
+Example -- drag from the centre to the right while holding W, tap space at 1s:
+
+  [
+    {"frame": 0,  "op": "mouse_down", "pos": [320, 180]},
+    {"frame": 0,  "op": "key_down",   "keys": ["w"]},
+    {"frame": 30, "op": "mouse_move", "pos": [500, 180]},
+    {"time": 1.0, "op": "key_tap",    "keys": ["space"]},
+    {"frame": 60, "op": "mouse_up"},
+    {"frame": 60, "op": "key_up",     "keys": ["w"]}
+  ]
+
+In the shader:
+
+  iMouse.xy               cursor in pixels
+  iMouse.z > 0.0          button held
+  iMouse.w > 0.0          this is the frame of the press
+  texelFetch(ch, ivec2(code, 0), 0).x   key held
+  texelFetch(ch, ivec2(code, 1), 0).x   key pressed this frame
+  texelFetch(ch, ivec2(code, 2), 0).x   key toggle
+"""
 
 
 # --------------------------------------------------------------------------
@@ -212,7 +234,7 @@ def _parse_resolution(text: str) -> tuple[int, int]:
 
 
 def _build_settings(args: argparse.Namespace, project: Any) -> Any:
-    from .inputs import KeyboardState, MouseState
+    from .inputs import InputTimeline, load_input_spec
     from .renderer import DEFAULT_DATE, DEFAULT_MAX_FRAMES, RenderSettings
 
     width = project.default("width", 640)
@@ -234,6 +256,10 @@ def _build_settings(args: argparse.Namespace, project: Any) -> Any:
     if frame < 0:
         raise ValueError(f"--frame must be >= 0 (got {frame})")
 
+    # Parsed after fps, since "time" in an operation is converted using it.
+    spec = getattr(args, "input_spec", None)
+    timeline = load_input_spec(spec, fps) if spec else InputTimeline.empty(fps)
+
     date = DEFAULT_DATE
     if getattr(args, "date", None):
         parts = [p.strip() for p in str(args.date).split(",")]
@@ -247,17 +273,7 @@ def _build_settings(args: argparse.Namespace, project: Any) -> Any:
         fps=float(fps),
         frame=int(frame),
         time=getattr(args, "time", None),
-        mouse=MouseState.from_spec(
-            position=getattr(args, "mouse", None),
-            button=getattr(args, "mouse_button", None),
-            click=getattr(args, "mouse_click", None),
-            normalized=bool(getattr(args, "mouse_norm", False)),
-        ),
-        keyboard=KeyboardState.from_spec(
-            keys=getattr(args, "key", []),
-            press=getattr(args, "key_press", []),
-            toggle=getattr(args, "key_toggle", []),
-        ),
+        inputs=timeline,
         date=date,
         simulate=getattr(args, "simulate", None),
         max_frames=(
@@ -1245,6 +1261,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "help_input", False):
+        print(INPUT_HELP, file=sys.stderr)
+        return EXIT_OK
     if not getattr(args, "command", None):
         parser.print_help(sys.stderr)
         return EXIT_USAGE

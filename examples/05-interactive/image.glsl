@@ -1,8 +1,16 @@
-// Simulated input. Nothing here needs a window or a real mouse:
+// Simulated input. Nothing here needs a window or a real mouse: input is a
+// timeline of operations, so a drag or a press at a specific frame is
+// reproducible.
 //
-//   shadertoy render -C examples/05-interactive --mouse 320,180
-//   shadertoy render -C examples/05-interactive --key w --key space
-//   shadertoy render -C examples/05-interactive --key-toggle g
+//   shadertoy render -C examples/05-interactive --input input.json --frame 80
+//   shadertoy render -C examples/05-interactive --frames 0-95:5 --input input.json
+//
+// Inline works too:
+//
+//   shadertoy render -C examples/05-interactive \
+//     --input '[{"frame":0,"op":"mouse_down","pos":[320,180]}]'
+//
+// See `shadertoy render --help-input` for the full operation list.
 //
 // iChannel0 is the keyboard: a 256x3 texture indexed by JavaScript key code.
 //   row 0 = held, row 1 = pressed this frame, row 2 = toggle.

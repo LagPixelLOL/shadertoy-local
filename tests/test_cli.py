@@ -59,7 +59,8 @@ class TestUsage:
     def test_bad_key_name(self, capsys, make_project, simple_image):
         root = make_project({"image.glsl": simple_image})
         code, payload, _ = run(
-            capsys, "render", "-C", str(root), "--key", "nonsense", "--json"
+            capsys, "render", "-C", str(root), "--json",
+            "--input", '[{"frame": 0, "op": "key_down", "keys": ["nonsense"]}]',
         )
         assert code == EXIT_USAGE
         assert "unknown key" in payload["error"]

@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from .inputs import KEYBOARD_HEIGHT, KEYBOARD_WIDTH, KeyboardState
+from .inputs import KEYBOARD_HEIGHT, KEYBOARD_WIDTH, InputState
 from .project import BUILTIN_TEXTURES, ChannelBinding, ProjectError
 
 #: Fixed seed so procedural textures are byte-identical across runs/machines.
@@ -199,8 +199,12 @@ class ChannelTextures:
         self._keyboard: Any | None = None
         self._owned: list[Any] = []
 
-    def keyboard(self, state: KeyboardState, frame: int) -> Any:
-        """The 256x3 keyboard texture, updated in place each frame."""
+    def keyboard(self, state: InputState) -> Any:
+        """The 256x3 keyboard texture, updated in place each frame.
+
+        The state is already resolved for the frame in question, so no frame
+        index is needed here.
+        """
         if self._keyboard is None:
             self._keyboard = self.ctx.texture(
                 (KEYBOARD_WIDTH, KEYBOARD_HEIGHT), 1, dtype="f1"
@@ -209,7 +213,7 @@ class ChannelTextures:
             self._keyboard.repeat_x = False
             self._keyboard.repeat_y = False
             self._owned.append(self._keyboard)
-        self._keyboard.write(state.texture_bytes(frame))
+        self._keyboard.write(state.keyboard_bytes())
         return self._keyboard
 
     def get(self, binding: ChannelBinding) -> Any:
