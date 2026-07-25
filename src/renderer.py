@@ -15,10 +15,14 @@ current-frame output, while a pass reading *itself* sees the previous frame --
 which is exactly Shadertoy's behaviour and what feedback effects depend on.
 
 **Determinism.** Time is derived from the frame index (``iTime = frame / fps``),
-never from a wall clock. When a project has buffer passes, requesting frame N
-simulates frames 0..N, because a feedback buffer's contents are a function of
-its whole history. With no buffers every frame is a pure function of the
-uniforms, so frame N is rendered directly.
+never from a wall clock.
+
+**Warm-up.** A feedback buffer's contents are a function of its whole history, so
+by default a project with buffer passes renders every frame from 0 up to the one
+requested. With no buffers each frame is a pure function of the uniforms and is
+rendered directly. ``precharge`` overrides that: a count renders only that many
+warm-up frames before the first capture, which is enough for a shader that merely
+needs its accumulator warm and avoids paying for hundreds of frames.
 """
 
 from __future__ import annotations
@@ -36,8 +40,11 @@ from .diagnostics import Diagnostic, parse_log
 from .inputs import InputState, InputTimeline
 from .project import PassSpec, Project
 
-#: Refuse to simulate more than this many frames without an explicit opt-in.
+#: Refuse to render more than this many frames without an explicit opt-in.
 DEFAULT_MAX_FRAMES = 100_000
+
+#: Precharge value meaning "warm up from frame 0".
+PRECHARGE_ALL = "all"
 
 #: Fixed date so ``iDate`` cannot make a render irreproducible.
 DEFAULT_DATE = (2024.0, 1.0, 1.0, 0.0)
@@ -72,8 +79,10 @@ class RenderSettings:
     inputs: InputTimeline = field(default_factory=InputTimeline.empty)
     date: tuple[float, float, float, float] = DEFAULT_DATE
     sample_rate: float = 44100.0
-    #: None = decide automatically from whether the project has buffers.
-    simulate: bool | None = None
+    #: Warm-up frames rendered, uncaptured, before the first captured frame, so
+    #: feedback buffers have history. An int, ``"all"`` to start from frame 0, or
+    #: None to decide from whether the project has buffer passes.
+    precharge: int | str | None = None
     max_frames: int = DEFAULT_MAX_FRAMES
 
     def time_at(self, frame: int) -> float:
@@ -91,6 +100,7 @@ class RenderSettings:
             "fps": self.fps,
             "frame": self.frame,
             "time": self.time,
+            "precharge": self.precharge,
             "inputs": self.inputs.to_dict(),
             "date": list(self.date),
         }
@@ -394,16 +404,40 @@ class Renderer:
         if any(f < 0 for f in wanted):
             raise RenderError("frame indices must be >= 0")
 
+        first = min(wanted)
         last = max(wanted)
-        simulate = self.settings.simulate
-        if simulate is None:
-            # Feedback buffers depend on their entire history; a plain shader
-            # does not, so it can jump straight to the requested frame.
-            simulate = bool(self.project.buffer_passes)
-        if last + 1 > self.settings.max_frames:
+        precharge = self.settings.precharge
+        automatic = precharge is None
+        if automatic:
+            # Feedback buffers depend on their whole history, so warm up fully.
+            # A plain shader is a pure function of its uniforms and needs none.
+            precharge = PRECHARGE_ALL if self.project.buffer_passes else 0
+
+        if precharge == PRECHARGE_ALL:
+            start = 0
+        else:
+            try:
+                amount = int(precharge)
+            except (TypeError, ValueError):
+                raise RenderError(
+                    f"precharge must be an integer or {PRECHARGE_ALL!r}, "
+                    f"got {precharge!r}"
+                ) from None
+            if amount < 0:
+                raise RenderError(f"precharge must be >= 0, got {amount}")
+            start = max(0, first - amount)
+
+        if automatic and not self.project.buffer_passes:
+            # Nothing accumulates, so render only what is actually captured.
+            timeline: range | list[int] = wanted
+        else:
+            timeline = range(start, last + 1)
+
+        rendered = len(timeline)
+        if rendered > self.settings.max_frames:
             raise RenderError(
-                f"frame {last} requires simulating {last + 1} frames, above the "
-                f"limit of {self.settings.max_frames}. Raise --max-frames to allow it."
+                f"this run would render {rendered} frames, above the limit of "
+                f"{self.settings.max_frames}. Raise --max-frames to allow it."
             )
 
         activate(self.ctx)
@@ -415,7 +449,6 @@ class Renderer:
         ctx.disable(ctx.BLEND)
         ctx.disable(ctx.CULL_FACE)
 
-        timeline = range(0, last + 1) if simulate else wanted
         wanted_set = set(wanted)
 
         for frame in timeline:

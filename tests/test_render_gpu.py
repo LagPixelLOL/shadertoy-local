@@ -408,7 +408,7 @@ class TestDeterminism:
         finally:
             r1.release()
 
-    def test_no_simulate_matches_simulate_for_stateless_shaders(
+    def test_warmup_is_irrelevant_for_stateless_shaders(
         self, make_project, gl_context
     ):
         """Skipping history is only safe without feedback; prove it is safe."""
@@ -416,9 +416,9 @@ class TestDeterminism:
             "void mainImage(out vec4 c, in vec2 f){ c = vec4(fract(iTime),0,0,1); }\n"
         )
         root = make_project({"image.glsl": source})
-        a, r1 = _render(root, gl_context, frame=9, simulate=True)
+        a, r1 = _render(root, gl_context, frame=9, precharge="all")
         try:
-            b, r2 = _render(root, gl_context, frame=9, simulate=False)
+            b, r2 = _render(root, gl_context, frame=9, precharge=0)
             try:
                 assert np.array_equal(a.images["image"], b.images["image"])
             finally:
@@ -563,3 +563,94 @@ class TestBufferFiltering:
         """Without mipmaps a high LOD clamps to level 0, proving the previous
         test is actually measuring the pyramid rather than base-level sampling."""
         assert self._high_lod(make_project, gl_context, "linear") == pytest.approx(0.0)
+
+
+class TestPrecharge:
+    """Warm-up control. The accumulator's value equals the number of frames
+    actually rendered, so it reports the window directly."""
+
+    ACCUMULATOR = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = texture(iChannel0, f/iResolution.xy) + vec4(1.0);\n"
+        "}\n"
+    )
+    PASSTHROUGH = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = texture(iChannel0, f/iResolution.xy);\n"
+        "}\n"
+    )
+
+    def _project(self, make_project):
+        return make_project(
+            {"buffer_a.glsl": self.ACCUMULATOR, "image.glsl": self.PASSTHROUGH},
+            config={
+                "buffer_a": {"channels": {"0": "buffer_a"}},
+                "image": {"channels": {"0": "buffer_a"}},
+            },
+        )
+
+    def _count(self, make_project, gl_context, **kwargs):
+        capture, renderer = _render(
+            self._project(make_project), gl_context, width=16, height=16, **kwargs
+        )
+        try:
+            return round(float(capture.images["buffer_a"][0, 0, 0]))
+        finally:
+            renderer.release()
+
+    def test_default_warms_up_fully_for_buffer_projects(
+        self, make_project, gl_context
+    ):
+        assert self._count(make_project, gl_context, frame=50) == 51
+
+    def test_all_matches_the_default(self, make_project, gl_context):
+        assert self._count(make_project, gl_context, frame=50, precharge="all") == 51
+
+    def test_explicit_window(self, make_project, gl_context):
+        """The point of the flag: 10 warm-up frames instead of 50."""
+        assert self._count(make_project, gl_context, frame=50, precharge=10) == 11
+
+    def test_zero_renders_only_the_target(self, make_project, gl_context):
+        assert self._count(make_project, gl_context, frame=50, precharge=0) == 1
+
+    def test_window_clamps_at_frame_zero(self, make_project, gl_context):
+        assert self._count(make_project, gl_context, frame=50, precharge=500) == 51
+
+    def test_negative_is_rejected(self, make_project, gl_context):
+        from shadertoy_local.renderer import RenderError
+
+        with pytest.raises(RenderError, match="precharge must be >= 0"):
+            self._count(make_project, gl_context, frame=5, precharge=-1)
+
+    def test_garbage_is_rejected(self, make_project, gl_context):
+        from shadertoy_local.renderer import RenderError
+
+        with pytest.raises(RenderError, match="must be an integer"):
+            self._count(make_project, gl_context, frame=5, precharge="banana")
+
+    def test_multi_capture_stays_contiguous(self, make_project, gl_context):
+        """Frames between captures are still rendered: they are part of the
+        history, so skipping them would corrupt later captures."""
+        project = load_project(self._project(make_project))
+        renderer = Renderer(
+            project,
+            gl_context.ctx,
+            RenderSettings(width=16, height=16, precharge=0),
+        )
+        try:
+            renderer.compile()
+            values = {
+                cap.frame: round(float(cap.images["buffer_a"][0, 0, 0]))
+                for cap in renderer.run([0, 5, 10])
+            }
+        finally:
+            renderer.release()
+        assert values == {0: 1, 5: 6, 10: 11}
+
+    def test_max_frames_guards_the_window(self, make_project, gl_context):
+        from shadertoy_local.renderer import RenderError
+
+        with pytest.raises(RenderError, match="would render 101 frames"):
+            self._count(
+                make_project, gl_context, frame=100, precharge="all", max_frames=50
+            )

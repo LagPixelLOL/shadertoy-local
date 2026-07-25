@@ -140,10 +140,33 @@ Time comes from the frame index (`iTime = frame / fps`), never a wall clock, and
 `iDate` is fixed by default. Identical arguments therefore produce
 byte-identical pixels (there is a test asserting exactly that).
 
-Because a feedback buffer's contents depend on its whole history, requesting
-frame *N* simulates frames 0..*N* when the project has buffer passes. Without
-buffers, every frame is a pure function of the uniforms, so frame *N* renders
-directly. Override with `--simulate` / `--no-simulate`.
+### Warm-up and multiple frames
+
+A feedback buffer's contents depend on its whole history, so a project with buffer
+passes renders every frame from 0 up to the one requested. Without buffers each
+frame is a pure function of the uniforms and renders directly.
+
+`--precharge` overrides that with a single knob:
+
+| Value | Effect |
+|---|---|
+| *(unset)* | `all` when the project has buffer passes, otherwise `0` |
+| `all` | Warm up from frame 0 |
+| `N` | Render only N warm-up frames before the first capture |
+| `0` | No warm-up; render the captured frames only |
+
+`--precharge 50 --frame 500` is the useful case: enough history for the
+accumulator to settle, without paying for 500 frames.
+
+Capture several frames with `--count` and `--every`, starting at `--frame`:
+
+```bash
+shadertoy render --count 10 --every 5              # frames 0, 5, ... 45
+shadertoy render --frame 100 --count 3 --every 10  # frames 100, 110, 120
+shadertoy render --count 8 --every 4 --precharge 20
+```
+
+Frames between captures are still rendered, since they are part of the history.
 
 ## Simulated input
 
@@ -232,8 +255,8 @@ only looks fine because the display clamps it.
 ## Regression testing
 
 ```bash
-shadertoy bless --frames 0,30,60      # record references
-shadertoy test  --frames 0,30,60      # compare (exit 1 on drift)
+shadertoy bless --count 3 --every 30      # record references
+shadertoy test  --count 3 --every 30      # compare (exit 1 on drift)
 ```
 
 References are 8-bit PNGs in `golden/`: small, reviewable in a pull request, and

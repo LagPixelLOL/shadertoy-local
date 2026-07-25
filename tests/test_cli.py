@@ -160,14 +160,63 @@ class TestRender:
         assert "file" not in payload["frames"][0]["passes"]["image"]
         assert not out.exists()
 
-    def test_frame_range_spec(self, capsys, make_project, simple_image, tmp_path):
+    def test_count_and_every(self, capsys, make_project, simple_image, tmp_path):
         root = make_project({"image.glsl": simple_image})
         code, payload, _ = run(
             capsys, "render", "-C", str(root), "-r", "16x16",
-            "--frames", "0-4:2", "-o", str(tmp_path / "o"), "--json",
+            "--count", "3", "--every", "2", "-o", str(tmp_path / "o"), "--json",
         )
         assert code == EXIT_OK
         assert [f["frame"] for f in payload["frames"]] == [0, 2, 4]
+
+    def test_count_starts_at_frame(self, capsys, make_project, simple_image, tmp_path):
+        root = make_project({"image.glsl": simple_image})
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "-r", "16x16", "--frame", "10",
+            "--count", "3", "--every", "5", "-o", str(tmp_path / "o"), "--json",
+        )
+        assert code == EXIT_OK
+        assert [f["frame"] for f in payload["frames"]] == [10, 15, 20]
+
+    def test_count_defaults_to_stride_one(
+        self, capsys, make_project, simple_image, tmp_path
+    ):
+        root = make_project({"image.glsl": simple_image})
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "-r", "16x16",
+            "--count", "4", "-o", str(tmp_path / "o"), "--json",
+        )
+        assert code == EXIT_OK
+        assert [f["frame"] for f in payload["frames"]] == [0, 1, 2, 3]
+
+    def test_no_count_captures_one_frame(
+        self, capsys, make_project, simple_image, tmp_path
+    ):
+        root = make_project({"image.glsl": simple_image})
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "-r", "16x16", "--frame", "7",
+            "-o", str(tmp_path / "o"), "--json",
+        )
+        assert code == EXIT_OK
+        assert [f["frame"] for f in payload["frames"]] == [7]
+
+    def test_every_without_count_is_rejected(
+        self, capsys, make_project, simple_image
+    ):
+        root = make_project({"image.glsl": simple_image})
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "--every", "5", "--no-write", "--json"
+        )
+        assert code == EXIT_USAGE
+        assert "only applies together with --count" in payload["error"]
+
+    def test_zero_count_is_rejected(self, capsys, make_project, simple_image):
+        root = make_project({"image.glsl": simple_image})
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "--count", "0", "--no-write", "--json"
+        )
+        assert code == EXIT_USAGE
+        assert "--count must be >= 1" in payload["error"]
 
     def test_all_passes(self, capsys, make_project, simple_image, tmp_path):
         root = make_project(
@@ -627,3 +676,103 @@ class TestInfoRuntimeCheck:
         code, payload, _ = run(capsys, "info", "--json")
         assert code == EXIT_OK
         assert payload["ok"] is True
+
+
+@pytest.mark.gpu
+class TestPrechargeFlag:
+    ACCUMULATOR = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = texture(iChannel0, f/iResolution.xy) + vec4(1.0);\n"
+        "}\n"
+    )
+    PASSTHROUGH = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = texture(iChannel0, f/iResolution.xy) / 1000.0;\n"
+        "}\n"
+    )
+
+    def _root(self, make_project):
+        return make_project(
+            {"buffer_a.glsl": self.ACCUMULATOR, "image.glsl": self.PASSTHROUGH},
+            config={
+                "buffer_a": {"channels": {"0": "buffer_a"}},
+                "image": {"channels": {"0": "buffer_a"}},
+            },
+        )
+
+    def _frames_rendered(self, capsys, root, *extra):
+        code, payload, _ = run(
+            capsys, "probe", "-C", str(root), "-r", "16x16",
+            "--at", "1,1", "--json", *extra,
+        )
+        assert code == EXIT_OK
+        return round(payload["passes"]["image"][0]["rgba"][0] * 1000)
+
+    def test_default_warms_up_fully(self, capsys, make_project):
+        root = self._root(make_project)
+        assert self._frames_rendered(capsys, root, "--frame", "30") == 31
+
+    def test_explicit_window(self, capsys, make_project):
+        root = self._root(make_project)
+        assert self._frames_rendered(
+            capsys, root, "--frame", "30", "--precharge", "5"
+        ) == 6
+
+    def test_all_keyword(self, capsys, make_project):
+        root = self._root(make_project)
+        assert self._frames_rendered(
+            capsys, root, "--frame", "30", "--precharge", "all"
+        ) == 31
+
+    def test_zero(self, capsys, make_project):
+        root = self._root(make_project)
+        assert self._frames_rendered(
+            capsys, root, "--frame", "30", "--precharge", "0"
+        ) == 1
+
+    def test_negative_rejected(self, capsys, make_project):
+        root = self._root(make_project)
+        code, payload, _ = run(
+            capsys, "probe", "-C", str(root), "--at", "0,0",
+            "--precharge", "-3", "--json",
+        )
+        assert code == EXIT_USAGE
+        assert ">= 0" in payload["error"]
+
+    def test_garbage_rejected(self, capsys, make_project):
+        root = self._root(make_project)
+        code, payload, _ = run(
+            capsys, "probe", "-C", str(root), "--at", "0,0",
+            "--precharge", "banana", "--json",
+        )
+        assert code == EXIT_USAGE
+        assert "frame count or 'all'" in payload["error"]
+
+    def test_precharge_applies_to_the_first_capture_only(
+        self, capsys, make_project, tmp_path
+    ):
+        """With --count, warm-up precedes the first frame; later captures keep
+        accumulating contiguously."""
+        root = self._root(make_project)
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "-r", "16x16",
+            "--frame", "20", "--count", "3", "--every", "5",
+            "--precharge", "5", "--no-write", "--stats", "--json",
+        )
+        assert code == EXIT_OK
+        assert [f["frame"] for f in payload["frames"]] == [20, 25, 30]
+        # Warm-up starts at 15, so frame 20 is the 6th rendered frame.
+        maxima = [
+            f["passes"]["image"]["stats"]["channels"]["r"]["max"] * 1000
+            for f in payload["frames"]
+        ]
+        assert [round(v) for v in maxima] == [6, 11, 16]
+
+    def test_no_simulate_flags_are_gone(self, capsys, make_project):
+        """--simulate/--no-simulate were three flags for one knob; argparse
+        rejects them outright now."""
+        root = self._root(make_project)
+        with pytest.raises(SystemExit) as excinfo:
+            main(["render", "-C", str(root), "--no-simulate"])
+        assert excinfo.value.code == EXIT_USAGE
+        assert "unrecognized arguments" in capsys.readouterr().err

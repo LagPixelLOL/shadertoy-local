@@ -3,7 +3,7 @@
 // reproducible.
 //
 //   shadertoy render -C examples/05-interactive --input input.json --frame 80
-//   shadertoy render -C examples/05-interactive --frames 0-95:5 --input input.json
+//   shadertoy render -C examples/05-interactive --count 20 --every 5 --input input.json
 //
 // Inline works too:
 //

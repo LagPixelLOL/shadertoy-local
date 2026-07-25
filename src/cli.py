@@ -121,23 +121,22 @@ def _add_frame_args(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument("--fps", type=float, default=None, help="frame rate (default: 60)")
     group.add_argument(
-        "--simulate",
-        dest="simulate",
-        action="store_true",
+        "--precharge",
         default=None,
-        help="force simulating every frame from 0",
-    )
-    group.add_argument(
-        "--no-simulate",
-        dest="simulate",
-        action="store_false",
-        help="render the target frame directly, even with feedback buffers",
+        metavar="N|all",
+        help=(
+            "warm-up frames rendered before the first captured frame, giving "
+            "feedback buffers history. A count, or 'all' to start from frame 0. "
+            "Default: 'all' when the project has buffer passes, otherwise 0, "
+            "since a shader with no buffers accumulates nothing"
+        ),
     )
     group.add_argument(
         "--max-frames",
         type=int,
         default=None,
-        help="safety limit on simulated frames",
+        metavar="N",
+        help="abort if the run would render more than N frames (default: 100000)",
     )
     group.add_argument(
         "--date",
@@ -235,7 +234,12 @@ def _parse_resolution(text: str) -> tuple[int, int]:
 
 def _build_settings(args: argparse.Namespace, project: Any) -> Any:
     from .inputs import InputTimeline, load_input_spec
-    from .renderer import DEFAULT_DATE, DEFAULT_MAX_FRAMES, RenderSettings
+    from .renderer import (
+        DEFAULT_DATE,
+        DEFAULT_MAX_FRAMES,
+        PRECHARGE_ALL,
+        RenderSettings,
+    )
 
     width = project.default("width", 640)
     height = project.default("height", 360)
@@ -256,6 +260,22 @@ def _build_settings(args: argparse.Namespace, project: Any) -> Any:
     if frame < 0:
         raise ValueError(f"--frame must be >= 0 (got {frame})")
 
+    raw_precharge = getattr(args, "precharge", None)
+    precharge: int | str | None = None
+    if raw_precharge is not None:
+        text = str(raw_precharge).strip().lower()
+        if text in ("all", "full"):
+            precharge = PRECHARGE_ALL
+        else:
+            try:
+                precharge = int(text)
+            except ValueError:
+                raise ValueError(
+                    f"--precharge expects a frame count or 'all' (got {raw_precharge!r})"
+                ) from None
+            if precharge < 0:
+                raise ValueError(f"--precharge must be >= 0 (got {precharge})")
+
     # Parsed after fps, since "time" in an operation is converted using it.
     spec = getattr(args, "input_spec", None)
     timeline = load_input_spec(spec, fps) if spec else InputTimeline.empty(fps)
@@ -275,7 +295,7 @@ def _build_settings(args: argparse.Namespace, project: Any) -> Any:
         time=getattr(args, "time", None),
         inputs=timeline,
         date=date,
-        simulate=getattr(args, "simulate", None),
+        precharge=precharge,
         max_frames=(
             args.max_frames
             if getattr(args, "max_frames", None)
@@ -295,35 +315,46 @@ def _open_context(args: argparse.Namespace) -> Any:
     )
 
 
-def _parse_frame_list(text: str, default: int) -> list[int]:
-    """Parse ``5``, ``0,10,20`` or ``0-30`` (optionally ``0-30:5``)."""
-    if text is None:
-        return [default]
-    raw = str(text).strip()
-    if not raw:
-        return [default]
-    frames: list[int] = []
-    for chunk in raw.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        step = 1
-        if ":" in chunk:
-            chunk, _, step_text = chunk.partition(":")
-            step = int(step_text)
-            if step <= 0:
-                raise ValueError("frame step must be positive")
-        if "-" in chunk.lstrip("-"):
-            start_text, _, end_text = chunk.partition("-")
-            start, end = int(start_text), int(end_text)
-            if end < start:
-                raise ValueError(f"frame range {chunk!r} ends before it starts")
-            frames.extend(range(start, end + 1, step))
-        else:
-            frames.append(int(chunk))
-    if any(f < 0 for f in frames):
-        raise ValueError("frame indices must be >= 0")
-    return sorted(set(frames))
+def _add_capture_args(parser: argparse.ArgumentParser) -> None:
+    """Flags choosing which frames get saved or compared.
+
+    Frames are always an arithmetic progression: start at --frame, take --count
+    of them, spaced --every apart. A single invocation therefore cannot capture an
+    arbitrary set like 0,7,53 -- run it twice for that -- but every regular
+    sampling pattern is expressible without a bespoke range syntax.
+    """
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=None,
+        metavar="N",
+        help="capture N frames instead of one, starting at --frame",
+    )
+    parser.add_argument(
+        "--every",
+        type=int,
+        default=None,
+        metavar="M",
+        help="frame separation between captures, for use with --count (default: 1)",
+    )
+
+
+def _resolve_capture(args: argparse.Namespace, start: int) -> list[int]:
+    """Frames to capture: ``start``, then ``count`` of them spaced ``every``."""
+    count = getattr(args, "count", None)
+    every = getattr(args, "every", None)
+
+    if count is None:
+        if every is not None:
+            raise ValueError("--every only applies together with --count")
+        return [start]
+
+    if count < 1:
+        raise ValueError(f"--count must be >= 1 (got {count})")
+    step = 1 if every is None else every
+    if step < 1:
+        raise ValueError(f"--every must be >= 1 (got {step})")
+    return [start + index * step for index in range(count)]
 
 
 # --------------------------------------------------------------------------
@@ -649,7 +680,7 @@ def cmd_render(args: argparse.Namespace) -> int:
 
     try:
         try:
-            frames = _parse_frame_list(args.frames, settings.frame)
+            frames = _resolve_capture(args, settings.frame)
         except ValueError as exc:
             report.warn(f"error: {exc}")
             report.emit({"ok": False, "error": str(exc)})
@@ -938,7 +969,7 @@ def _golden_run(args: argparse.Namespace, bless: bool) -> int:
 
     try:
         try:
-            frames = _parse_frame_list(args.frames, settings.frame)
+            frames = _resolve_capture(args, settings.frame)
         except ValueError as exc:
             report.warn(f"error: {exc}")
             report.emit({"ok": False, "error": str(exc)})
@@ -1102,12 +1133,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument(
         "-o", "--output", default=None, metavar="DIR", help="output directory"
     )
-    render.add_argument(
-        "--frames",
-        default=None,
-        metavar="SPEC",
-        help="frames to capture: 5, 0,10,20, 0-30, or 0-30:5",
-    )
+    _add_capture_args(render)
     render.add_argument(
         "-p",
         "--pass",
@@ -1219,12 +1245,7 @@ def build_parser() -> argparse.ArgumentParser:
         _add_gpu_args(sub)
         _add_frame_args(sub)
         _add_input_args(sub)
-        sub.add_argument(
-            "--frames",
-            default=None,
-            metavar="SPEC",
-            help="frames to compare: 5, 0,10,20, 0-30, or 0-30:5",
-        )
+        _add_capture_args(sub)
         sub.add_argument(
             "-p",
             "--pass",
