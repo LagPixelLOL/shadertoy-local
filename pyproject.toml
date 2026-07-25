@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "shadertoy-local"
@@ -21,8 +21,12 @@ dev = ["pytest>=7.0"]
 [project.scripts]
 shadertoy = "shadertoy_local.cli:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/shadertoy_local"]
+[tool.setuptools]
+# The package lives in a flat src/ directory but installs (and imports) as
+# `shadertoy_local`; a module importable as `src` would collide with every
+# other project using the src layout.
+packages = ["shadertoy_local"]
+package-dir = { shadertoy_local = "src" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

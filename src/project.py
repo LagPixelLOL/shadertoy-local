@@ -14,6 +14,11 @@ Nothing but ``image.glsl`` is mandatory, so a one-file shader works with zero
 configuration. ``shadertoy.json`` is the canonical config format; an equivalent
 ``shadertoy.toml`` is also accepted since the schema is identical.
 
+**Passes are identified by filename, never by config.** ``image.glsl`` is the
+image pass, ``buffer_a.glsl`` is Buffer A, ``common.glsl`` is shared code. The
+config file only describes *wiring* -- which channel reads what, and how it is
+sampled -- so a file's role is always obvious from its name alone.
+
 Config schema::
 
     {
@@ -47,13 +52,14 @@ BUFFER_NAMES = ("buffer_a", "buffer_b", "buffer_c", "buffer_d")
 #: Every pass key, in execution order. The image pass always runs last.
 PASS_NAMES = (*BUFFER_NAMES, "image")
 
-#: Filenames accepted for each pass, in priority order.
+#: Filenames accepted for each pass, in priority order. A pass's identity comes
+#: from its filename alone; there is deliberately no config override.
 _PASS_FILENAMES: dict[str, tuple[str, ...]] = {
-    "image": ("image.glsl", "image.frag", "main.glsl", "shader.glsl"),
-    "buffer_a": ("buffer_a.glsl", "bufferA.glsl", "buffer_a.frag"),
-    "buffer_b": ("buffer_b.glsl", "bufferB.glsl", "buffer_b.frag"),
-    "buffer_c": ("buffer_c.glsl", "bufferC.glsl", "buffer_c.frag"),
-    "buffer_d": ("buffer_d.glsl", "bufferD.glsl", "buffer_d.frag"),
+    "image": ("image.glsl", "image.frag"),
+    "buffer_a": ("buffer_a.glsl", "buffer_a.frag"),
+    "buffer_b": ("buffer_b.glsl", "buffer_b.frag"),
+    "buffer_c": ("buffer_c.glsl", "buffer_c.frag"),
+    "buffer_d": ("buffer_d.glsl", "buffer_d.frag"),
 }
 _COMMON_FILENAMES = ("common.glsl", "common.frag")
 
@@ -384,7 +390,7 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
     config_path = _find_first(root, CONFIG_NAMES)
     if config_path is not None:
         config = _load_config(config_path)
-        known = {*PASS_NAMES, "defaults", "common", "name", "description"}
+        known = {*PASS_NAMES, "defaults", "name", "description"}
         unknown = sorted(set(config) - known)
         if unknown:
             raise ProjectError(
@@ -392,7 +398,7 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
                 f"Expected any of: {', '.join(sorted(known))}"
             )
 
-    # Discover pass files. A pass may also be declared in config via `file`.
+    # Passes are discovered by filename; config never names files.
     passes: dict[str, PassSpec] = {}
     for name in PASS_NAMES:
         table = config.get(name, {})
@@ -401,27 +407,31 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
                 f'{config_path}: "{name}" must be an object, '
                 f"got {type(table).__name__}"
             )
-        unknown = sorted(set(table) - {"file", "scale", "channels"})
+        unknown = sorted(set(table) - {"scale", "channels"})
         if unknown:
+            hint = ""
+            if "file" in unknown:
+                hint = (
+                    f'\nPasses are identified by filename, so "file" is not accepted. '
+                    f'Name the file {_PASS_FILENAMES[name][0]} instead.'
+                )
             raise ProjectError(
                 f'{config_path}: "{name}" has unknown key(s): {", ".join(unknown)}\n'
-                'Expected any of: channels, file, scale'
+                f"Expected any of: channels, scale{hint}"
             )
-        declared_file = table.get("file")
-        if declared_file:
-            candidate = (root / str(declared_file)).resolve()
-            if not candidate.is_file():
+        candidate = _find_first(root, _PASS_FILENAMES[name])
+        if candidate is None:
+            if table:
                 raise ProjectError(
-                    f"[{name}] file = {declared_file!r} does not exist at {candidate}"
+                    f'{config_path}: "{name}" is configured, but no such pass file '
+                    f"exists. Expected one of: {', '.join(_PASS_FILENAMES[name])}"
                 )
-        else:
-            candidate = _find_first(root, _PASS_FILENAMES[name])
-            if candidate is None:
-                continue
+            continue
         scale = table.get("scale", 1.0)
-        if not isinstance(scale, (int, float)) or not 0 < float(scale) <= 1:
+        if not isinstance(scale, (int, float)) or isinstance(scale, bool) or not 0 < float(scale) <= 1:
             raise ProjectError(
-                f"[{name}] scale must be a number in (0, 1], got {scale!r}"
+                f'{config_path}: "{name}".scale must be a number in (0, 1], '
+                f"got {scale!r}"
             )
         passes[name] = PassSpec(
             name=name, path=candidate, source=_read(candidate), scale=float(scale)
@@ -434,14 +444,8 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
             "Run `shadertoy init` to scaffold a project."
         )
 
+    # common.glsl is likewise discovered by name only.
     common_path = _find_first(root, _COMMON_FILENAMES)
-    common_file = config.get("common", {}).get("file") if isinstance(
-        config.get("common"), dict
-    ) else None
-    if common_file:
-        common_path = (root / str(common_file)).resolve()
-        if not common_path.is_file():
-            raise ProjectError(f"[common] file = {common_file!r} not found")
 
     # Resolve channel bindings now so errors surface before touching the GPU.
     declared = set(passes)
