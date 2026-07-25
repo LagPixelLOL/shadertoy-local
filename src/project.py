@@ -44,8 +44,9 @@ from __future__ import annotations
 import json
 import tomllib
 from dataclasses import dataclass, field
+from difflib import get_close_matches
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 #: Buffer pass keys, in Shadertoy's fixed execution order.
 BUFFER_NAMES = ("buffer_a", "buffer_b", "buffer_c", "buffer_d")
@@ -112,9 +113,149 @@ _WRAPS = ("clamp", "repeat")
 #: Channel kinds. Inferred from ``source`` when not stated explicitly.
 CHANNEL_TYPES = ("buffer", "texture", "builtin", "keyboard")
 
+#: Every key a channel object may carry.
+_CHANNEL_KEYS = ("type", "source", "filter", "wrap", "vflip", "size")
+
 
 class ProjectError(RuntimeError):
     """Raised for malformed projects or configuration."""
+
+
+# --------------------------------------------------------------------------
+# Strict validation helpers
+# --------------------------------------------------------------------------
+#
+# Config is validated exhaustively rather than read leniently. A mistyped key
+# that is merely ignored is the worst outcome available: the shader renders, at
+# the wrong size or with the wrong sampler, and nothing says so. Every key is
+# checked against an allow-list and every value against its type and range, so a
+# typo fails at `shadertoy check` instead of silently changing the output.
+
+
+def _reject_unknown(where: str, mapping: dict[str, Any], allowed: Iterable[str]) -> None:
+    """Fail on any key outside *allowed*, suggesting a near match if there is one."""
+    allowed = sorted(allowed)
+    unknown = sorted(set(mapping) - set(allowed))
+    if not unknown:
+        return
+    hints: list[str] = []
+    for key in unknown:
+        close = get_close_matches(key, allowed, n=1, cutoff=0.7)
+        if close:
+            hints.append(f"{key!r} (did you mean {close[0]!r}?)")
+        else:
+            hints.append(repr(key))
+    raise ProjectError(
+        f"{where}: unknown key(s): {', '.join(hints)}\n"
+        f"Allowed keys: {', '.join(allowed)}"
+    )
+
+
+def _as_bool(value: Any, where: str, key: str) -> bool:
+    if not isinstance(value, bool):
+        raise ProjectError(
+            f'{where}: "{key}" must be true or false, got {value!r} '
+            f"({type(value).__name__})"
+        )
+    return value
+
+
+def _as_str(
+    value: Any, where: str, key: str, *, choices: Iterable[str] | None = None
+) -> str:
+    if not isinstance(value, str):
+        raise ProjectError(
+            f'{where}: "{key}" must be a string, got {value!r} '
+            f"({type(value).__name__})"
+        )
+    if choices is not None:
+        allowed = sorted(choices)
+        lowered = value.lower()
+        if lowered not in allowed:
+            hint = get_close_matches(lowered, allowed, n=1, cutoff=0.6)
+            suffix = f" (did you mean {hint[0]!r}?)" if hint else ""
+            raise ProjectError(
+                f'{where}: "{key}" must be one of {", ".join(allowed)}, '
+                f"got {value!r}{suffix}"
+            )
+        return lowered
+    return value
+
+
+def _as_int(
+    value: Any,
+    where: str,
+    key: str,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    # bool is a subclass of int, so `"width": true` would otherwise become 1.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProjectError(
+            f'{where}: "{key}" must be an integer, got {value!r} '
+            f"({type(value).__name__})"
+        )
+    if minimum is not None and value < minimum:
+        raise ProjectError(f'{where}: "{key}" must be >= {minimum}, got {value}')
+    if maximum is not None and value > maximum:
+        raise ProjectError(f'{where}: "{key}" must be <= {maximum}, got {value}')
+    return value
+
+
+def _as_number(
+    value: Any,
+    where: str,
+    key: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    exclusive_minimum: bool = False,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProjectError(
+            f'{where}: "{key}" must be a number, got {value!r} '
+            f"({type(value).__name__})"
+        )
+    number = float(value)
+    if minimum is not None:
+        if exclusive_minimum and number <= minimum:
+            raise ProjectError(f'{where}: "{key}" must be > {minimum}, got {value}')
+        if not exclusive_minimum and number < minimum:
+            raise ProjectError(f'{where}: "{key}" must be >= {minimum}, got {value}')
+    if maximum is not None and number > maximum:
+        raise ProjectError(f'{where}: "{key}" must be <= {maximum}, got {value}')
+    return number
+
+
+def _as_object(value: Any, where: str, key: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProjectError(
+            f'{where}: "{key}" must be an object, got {value!r} '
+            f"({type(value).__name__})"
+        )
+    return value
+
+
+#: Keys accepted in the ``defaults`` table, with their validators. Anything else
+#: is rejected: silently ignoring "widht" would render at the wrong size.
+_DEFAULTS_SCHEMA: dict[str, Any] = {
+    "width": lambda v, w: _as_int(v, w, "width", minimum=1, maximum=65536),
+    "height": lambda v, w: _as_int(v, w, "height", minimum=1, maximum=65536),
+    "fps": lambda v, w: _as_number(v, w, "fps", minimum=0.0, exclusive_minimum=True),
+    "glsl_version": lambda v, w: _as_int(
+        v, w, "glsl_version", minimum=330, maximum=460
+    ),
+}
+
+
+def _validate_defaults(table: Any, where: str) -> dict[str, Any]:
+    table = _as_object(table, where, "defaults")
+    _reject_unknown(f"{where}: defaults", table, _DEFAULTS_SCHEMA)
+    validated: dict[str, Any] = {}
+    for key, value in table.items():
+        validated[key] = _DEFAULTS_SCHEMA[key](value, f"{where}: defaults")
+    return validated
 
 
 @dataclass
@@ -285,32 +426,36 @@ def _parse_channel(
         spec: dict[str, Any] = {"source": raw}
     elif isinstance(raw, dict):
         spec = dict(raw)
-        # Accept `path`/`texture`/`file` as aliases for `source`.
-        for alias in ("path", "texture", "file"):
-            if alias in spec and "source" not in spec:
-                spec["source"] = spec.pop(alias)
+        # One spelling only. Accepting path/texture/file as synonyms for source
+        # meant a config could be written four ways, and a typo in one of them
+        # looked like a missing source rather than a mistake.
+        for alias in ("path", "texture", "file", "src"):
+            if alias in spec:
+                raise ProjectError(
+                    f'{where}: use "source", not "{alias}"'
+                )
+        _reject_unknown(where, spec, _CHANNEL_KEYS)
         # `{"type": "keyboard"}` needs no source.
         if "source" not in spec and spec.get("type") == "keyboard":
             spec["source"] = "keyboard"
     else:
         raise ProjectError(
-            f"{where} must be a string or an object, got {type(raw).__name__}"
+            f"{where} must be a string or an object, got {raw!r} "
+            f"({type(raw).__name__})"
         )
 
     source = spec.get("source")
-    if not isinstance(source, str) or not source:
-        raise ProjectError(f"{where} is missing a source")
+    if source is None:
+        raise ProjectError(f'{where}: missing "source"')
+    source = _as_str(source, where, "source")
+    if not source:
+        raise ProjectError(f'{where}: "source" must not be empty')
 
     kind = spec.get("type")
     if kind is None:
         kind = _infer_kind(source)
     else:
-        kind = str(kind).lower()
-        if kind not in CHANNEL_TYPES:
-            raise ProjectError(
-                f"{where}: type must be one of {', '.join(CHANNEL_TYPES)} "
-                f"(got {kind!r})"
-            )
+        kind = _as_str(kind, where, "type", choices=CHANNEL_TYPES)
         inferred = _infer_kind(source)
         # Only complain when the declared type is genuinely impossible; a
         # 'texture' source is a path and cannot be verified by name alone.
@@ -335,32 +480,32 @@ def _parse_channel(
                     f"{inferred} name. Rename the file or set type to {inferred!r}."
                 )
 
-    size = spec.get("size")
-    if size is not None:
+    size = None
+    if "size" in spec:
         if kind != "builtin":
             raise ProjectError(
                 f'{where}: "size" only applies to builtin sources, not {kind!r}'
             )
-        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
-            raise ProjectError(f'{where}: "size" must be a positive integer')
+        size = _as_int(spec["size"], where, "size", minimum=1, maximum=16384)
 
     binding = ChannelBinding(
         source=source,
         kind=kind,
-        filter=str(spec.get("filter", "linear")).lower(),
-        wrap=str(spec.get("wrap", "repeat")).lower(),
-        vflip=bool(spec.get("vflip", True)),
+        filter=(
+            _as_str(spec["filter"], where, "filter", choices=_FILTERS)
+            if "filter" in spec
+            else "linear"
+        ),
+        wrap=(
+            _as_str(spec["wrap"], where, "wrap", choices=_WRAPS)
+            if "wrap" in spec
+            else "repeat"
+        ),
+        vflip=(
+            _as_bool(spec["vflip"], where, "vflip") if "vflip" in spec else True
+        ),
         size=size,
     )
-    if binding.filter not in _FILTERS:
-        raise ProjectError(
-            f"{where}: filter must be one of {', '.join(_FILTERS)} "
-            f"(got {binding.filter!r})"
-        )
-    if binding.wrap not in _WRAPS:
-        raise ProjectError(
-            f"{where}: wrap must be one of {', '.join(_WRAPS)} (got {binding.wrap!r})"
-        )
 
     if binding.is_buffer:
         if source not in declared:
@@ -428,11 +573,14 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
     if config_path is not None:
         config = _load_config(config_path)
         known = {*PASS_NAMES, "defaults", "name", "description"}
-        unknown = sorted(set(config) - known)
-        if unknown:
-            raise ProjectError(
-                f"{config_path}: unknown top-level key(s): {', '.join(unknown)}\n"
-                f"Expected any of: {', '.join(sorted(known))}"
+        _reject_unknown(str(config_path), config, known)
+        if "name" in config:
+            _as_str(config["name"], str(config_path), "name")
+        if "description" in config:
+            _as_str(config["description"], str(config_path), "description")
+        if "defaults" in config:
+            config["defaults"] = _validate_defaults(
+                config["defaults"], str(config_path)
             )
 
     # Passes are discovered by filename; config never names files.
@@ -444,18 +592,13 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
                 f'{config_path}: "{name}" must be an object, '
                 f"got {type(table).__name__}"
             )
-        unknown = sorted(set(table) - {"scale", "channels"})
-        if unknown:
-            hint = ""
-            if "file" in unknown:
-                hint = (
-                    f'\nPasses are identified by filename, so "file" is not accepted. '
-                    f'Name the file {_PASS_FILENAMES[name][0]} instead.'
-                )
+        if "file" in table:
             raise ProjectError(
-                f'{config_path}: "{name}" has unknown key(s): {", ".join(unknown)}\n'
-                f"Expected any of: channels, scale{hint}"
+                f'{config_path}: "{name}" must not set "file". Passes are '
+                f"identified by filename, so name the file "
+                f"{_PASS_FILENAMES[name][0]} instead."
             )
+        _reject_unknown(f'{config_path}: "{name}"', table, ("scale", "channels"))
         candidate = _find_first(root, _PASS_FILENAMES[name])
         if candidate is None:
             if table:
@@ -464,12 +607,18 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
                     f"exists. Expected one of: {', '.join(_PASS_FILENAMES[name])}"
                 )
             continue
-        scale = table.get("scale", 1.0)
-        if not isinstance(scale, (int, float)) or isinstance(scale, bool) or not 0 < float(scale) <= 1:
-            raise ProjectError(
-                f'{config_path}: "{name}".scale must be a number in (0, 1], '
-                f"got {scale!r}"
+        scale = (
+            _as_number(
+                table["scale"],
+                f'{config_path}: "{name}"',
+                "scale",
+                minimum=0.0,
+                maximum=1.0,
+                exclusive_minimum=True,
             )
+            if "scale" in table
+            else 1.0
+        )
         passes[name] = PassSpec(
             name=name, path=candidate, source=_read(candidate), scale=float(scale)
         )
@@ -488,22 +637,22 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
     declared = set(passes)
     for name, spec in passes.items():
         table = config.get(name, {})
-        channels = table.get("channels", {}) if isinstance(table, dict) else {}
-        if not isinstance(channels, dict):
-            raise ProjectError(
-                f'{config_path}: "{name}".channels must be an object keyed by '
-                f'channel index, got {type(channels).__name__}'
-            )
-        valid_keys = {str(i) for i in range(4)} | {f"channel{i}" for i in range(4)}
-        unknown = sorted(set(channels) - valid_keys)
-        if unknown:
-            raise ProjectError(
-                f'{config_path}: "{name}".channels has invalid key(s): '
-                f'{", ".join(unknown)}\n'
-                'Channels are keyed "0".."3" (or "channel0".."channel3").'
-            )
+        where = f'{config_path}: "{name}".channels'
+        channels = (
+            _as_object(table["channels"], f'{config_path}: "{name}"', "channels")
+            if "channels" in table
+            else {}
+        )
+        valid_keys = [str(i) for i in range(4)] + [f"channel{i}" for i in range(4)]
+        _reject_unknown(where, channels, valid_keys)
         for index in range(4):
-            raw = channels.get(str(index), channels.get(f"channel{index}"))
+            short, long = str(index), f"channel{index}"
+            if short in channels and long in channels:
+                raise ProjectError(
+                    f'{where}: channel {index} is given twice, as "{short}" and '
+                    f'"{long}". Use one spelling.'
+                )
+            raw = channels.get(short, channels.get(long))
             if raw is None:
                 continue
             spec.channels[index] = _parse_channel(raw, root, name, index, declared)

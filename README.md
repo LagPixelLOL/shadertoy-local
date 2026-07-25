@@ -112,7 +112,29 @@ Sizes are assumed from the site's assets; override with `"size": N` on any
 builtin if one is wrong.
 
 `"0": "buffer_a"` is shorthand for the full object; `type` is inferred from
-`source` and validated when given, so a typo becomes a clear error.
+`source` and validated when given.
+
+### Validation is strict
+
+Config is checked exhaustively rather than read leniently, because a mistyped key
+that is merely ignored is the worst available outcome: the shader renders, at the
+wrong size or with the wrong sampler, and nothing says so. Every key is checked
+against an allow-list and every value against its type and range, so mistakes fail
+at `shadertoy check` rather than surfacing as a puzzling image:
+
+```
+$ shadertoy check
+error: shadertoy.json: defaults: unknown key(s): 'widht' (did you mean 'width'?)
+Allowed keys: fps, glsl_version, height, width
+```
+
+Specifically rejected: unknown keys at every level (with a "did you mean"
+suggestion), non-integer or out-of-range `width`/`height`/`fps`/`glsl_version`,
+`scale` outside `(0, 1]`, anything but a real `true`/`false` for `vflip` (so
+`"yes"` and `1` are errors), unknown `filter`/`wrap`/`type` values, `size` on a
+non-builtin channel, giving one channel twice as both `"0"` and `"channel0"`, and
+synonyms for `source` — it is spelled `source`, not `path`, `texture` or `file`.
+TOML is validated identically, since the schema is shared.
 
 ## Commands
 
