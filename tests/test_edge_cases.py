@@ -896,3 +896,247 @@ class TestCliEdges:
         )
         assert code == 0
         assert payload["ok"] is True
+
+
+# --------------------------------------------------------------------------
+# Sampler independence and shared-buffer state
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.gpu
+class TestSamplerIndependence:
+    """Filter and wrap live on the GL *texture*, not the texture unit, so two
+    channels reading one buffer would share a single setting unless sampler
+    objects are used. A buffer read by several channels is the normal case, so
+    this silently produced the wrong filter."""
+
+    # A 2x2 checker in a quarter-scale buffer, sampled exactly between texels:
+    # nearest snaps to a corner (0.0), linear interpolates (0.5).
+    CHECKER = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    vec2 g = floor(f / (iResolution.xy / 2.0));\n"
+        "    c = vec4(mod(g.x + g.y, 2.0));\n"
+        "}\n"
+    )
+    TWO_CHANNELS = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = vec4(texture(iChannel0, vec2(0.5)).r,\n"
+        "             texture(iChannel1, vec2(0.5)).r, 0.0, 1.0);\n"
+        "}\n"
+    )
+
+    def _render(self, root, gl_context):
+        from shadertoy_local.renderer import Renderer, RenderSettings
+
+        renderer = Renderer(
+            load_project(root), gl_context.ctx, RenderSettings(width=64, height=64)
+        )
+        renderer.compile()
+        try:
+            return renderer.render_frame().images["image"][1, 1].copy()
+        finally:
+            renderer.release()
+
+    def test_one_buffer_two_filters_on_one_pass(self, make_project, gl_context):
+        root = make_project(
+            {"buffer_a.glsl": self.CHECKER, "image.glsl": self.TWO_CHANNELS},
+            config={
+                "buffer_a": {"scale": 0.25},
+                "image": {
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a", "filter": "nearest"},
+                        "1": {"type": "buffer", "source": "buffer_a", "filter": "linear"},
+                    }
+                },
+            },
+        )
+        pixel = self._render(root, gl_context)
+        assert pixel[0] == pytest.approx(0.0), "channel 0 asked for nearest"
+        assert pixel[1] == pytest.approx(0.5), "channel 1 asked for linear"
+
+    def test_one_buffer_different_filters_across_passes(
+        self, make_project, gl_context
+    ):
+        """buffer_b reads buffer_a with nearest while image reads it with linear."""
+        root = make_project(
+            {
+                "buffer_a.glsl": self.CHECKER,
+                "buffer_b.glsl": (
+                    "void mainImage(out vec4 c, in vec2 f){\n"
+                    "    c = vec4(texture(iChannel0, vec2(0.5)).r);\n"
+                    "}\n"
+                ),
+                "image.glsl": self.TWO_CHANNELS,
+            },
+            config={
+                "buffer_a": {"scale": 0.25},
+                "buffer_b": {
+                    "scale": 0.25,
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a", "filter": "nearest"}
+                    },
+                },
+                "image": {
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a", "filter": "linear"},
+                        "1": {"type": "buffer", "source": "buffer_b", "filter": "nearest"},
+                    }
+                },
+            },
+        )
+        pixel = self._render(root, gl_context)
+        assert pixel[0] == pytest.approx(0.5), "image read buffer_a with linear"
+        assert pixel[1] == pytest.approx(0.0), "buffer_b read buffer_a with nearest"
+
+    def test_wrap_is_also_independent(self, make_project, gl_context):
+        """Sampling outside [0,1]: clamp holds the edge, repeat tiles."""
+        gradient = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    c = vec4(f.x / iResolution.x);\n"
+            "}\n"
+        )
+        sample = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    c = vec4(texture(iChannel0, vec2(1.25, 0.5)).r,\n"
+            "             texture(iChannel1, vec2(1.25, 0.5)).r, 0.0, 1.0);\n"
+            "}\n"
+        )
+        root = make_project(
+            {"buffer_a.glsl": gradient, "image.glsl": sample},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a", "wrap": "clamp"},
+                        "1": {"type": "buffer", "source": "buffer_a", "wrap": "repeat"},
+                    }
+                }
+            },
+        )
+        pixel = self._render(root, gl_context)
+        assert pixel[0] > 0.9, "clamp holds the right edge"
+        assert pixel[1] < 0.4, "repeat wraps back to a quarter across"
+
+
+# --------------------------------------------------------------------------
+# Config ambiguity
+# --------------------------------------------------------------------------
+
+
+class TestConfigAmbiguity:
+    def test_two_config_files_are_rejected(self, tmp_path):
+        """Preferring one silently makes edits to the other appear to do nothing."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "image.glsl").write_text(IMAGE)
+        (root / "shadertoy.json").write_text('{"defaults":{"width":111}}')
+        (root / "shadertoy.toml").write_text("[defaults]\nwidth = 222\n")
+        with pytest.raises(ProjectError, match="multiple config files"):
+            load_project(root)
+
+    def test_dotted_and_plain_together_are_rejected(self, tmp_path):
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "image.glsl").write_text(IMAGE)
+        (root / "shadertoy.json").write_text("{}")
+        (root / ".shadertoy.json").write_text("{}")
+        with pytest.raises(ProjectError, match="multiple config files"):
+            load_project(root)
+
+    def test_one_config_file_is_fine(self, tmp_path):
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "image.glsl").write_text(IMAGE)
+        (root / "shadertoy.json").write_text('{"defaults":{"width":111}}')
+        assert load_project(root).default("width", 0) == 111
+
+
+# --------------------------------------------------------------------------
+# Diagnostics through includes, and remaining uniforms
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.gpu
+class TestDiagnosticsThroughIncludes:
+    def test_error_inside_an_include_maps_to_that_file(
+        self, make_project, gl_context
+    ):
+        """The origin table must survive include expansion, not just the
+        common/pass boundary."""
+        from shadertoy_local.renderer import Renderer, RenderSettings, ShaderCompileError
+
+        root = make_project(
+            {
+                "image.glsl": '#include "lib/util.glsl"\n'
+                "void mainImage(out vec4 c, in vec2 f){ c = vec4(helper()); }\n",
+                "lib/util.glsl": "// a helper\nfloat helper(){ return nope; }\n",
+            }
+        )
+        renderer = Renderer(
+            load_project(root), gl_context.ctx, RenderSettings(width=4, height=4)
+        )
+        try:
+            with pytest.raises(ShaderCompileError) as excinfo:
+                renderer.compile()
+        finally:
+            renderer.release()
+        errors = [d for d in excinfo.value.diagnostics if d.is_error]
+        assert errors[0].file == "lib/util.glsl"
+        assert errors[0].line == 2
+
+
+@pytest.mark.gpu
+class TestRemainingUniforms:
+    @pytest.mark.parametrize(
+        "expr,expected",
+        [
+            ("iChannelTime[0]", 0.5),
+            ("iSampleRate / 100000.0", 0.441),
+            ("iFrameRate / 100.0", 0.6),
+            ("iDate.w / 100.0", 0.0),
+        ],
+    )
+    def test_values(self, make_project, gl_context, expr, expected):
+        from shadertoy_local.renderer import Renderer, RenderSettings
+
+        source = (
+            "void mainImage(out vec4 c, in vec2 f){ c = vec4(%s, 0, 0, 1); }\n" % expr
+        )
+        renderer = Renderer(
+            load_project(make_project({"image.glsl": source})),
+            gl_context.ctx,
+            RenderSettings(width=4, height=4, frame=30, fps=60.0),
+        )
+        renderer.compile()
+        try:
+            value = float(renderer.render_frame().images["image"][0, 0, 0])
+        finally:
+            renderer.release()
+        assert value == pytest.approx(expected, abs=1e-4)
+
+
+@pytest.mark.gpu
+class TestPrechargeOnStatelessShaders:
+    @pytest.mark.parametrize("precharge", [None, 0, 5, "all"])
+    def test_precharge_cannot_change_a_pure_shader(
+        self, make_project, gl_context, precharge
+    ):
+        """A shader with no buffers is a pure function of its uniforms, so the
+        warm-up window must be unobservable."""
+        from shadertoy_local.renderer import Renderer, RenderSettings
+
+        source = "void mainImage(out vec4 c, in vec2 f){ c = vec4(fract(iTime),0,0,1); }\n"
+        root = make_project({"image.glsl": source})
+
+        def render(pc):
+            renderer = Renderer(
+                load_project(root),
+                gl_context.ctx,
+                RenderSettings(width=8, height=8, frame=9, precharge=pc),
+            )
+            renderer.compile()
+            try:
+                return renderer.render_frame().images["image"].copy()
+            finally:
+                renderer.release()
+
+        assert np.array_equal(render(None), render(precharge))

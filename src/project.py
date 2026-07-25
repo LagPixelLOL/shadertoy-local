@@ -400,6 +400,22 @@ def _find_first(root: Path, names: tuple[str, ...]) -> Path | None:
     return None
 
 
+def _find_config(root: Path) -> Path | None:
+    """Locate the one config file, rejecting ambiguity.
+
+    Two config files means one of them is silently ignored, and the loser is
+    invisible: edits to it appear to do nothing at all.
+    """
+    present = [root / name for name in CONFIG_NAMES if (root / name).is_file()]
+    if len(present) > 1:
+        listing = ", ".join(path.name for path in present)
+        raise ProjectError(
+            f"{root}: multiple config files present ({listing}). "
+            f"Keep exactly one, or the others are silently ignored."
+        )
+    return present[0] if present else None
+
+
 def _read(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -569,7 +585,7 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
         raise ProjectError(f"{root} is not a directory")
 
     config: dict[str, Any] = {}
-    config_path = _find_first(root, CONFIG_NAMES)
+    config_path = _find_config(root)
     if config_path is not None:
         config = _load_config(config_path)
         known = {*PASS_NAMES, "defaults", "name", "description"}

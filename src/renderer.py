@@ -240,6 +240,8 @@ class Renderer:
         self.channels = ChannelTextures(ctx)
         self._quad: Any | None = None
         self._vaos: dict[str, Any] = {}
+        #: Sampler objects keyed by (filter, wrap), shared across passes.
+        self._samplers: dict[tuple[str, str], Any] = {}
         self._compiled = False
 
     # -- compilation -----------------------------------------------------
@@ -324,6 +326,24 @@ class Renderer:
 
     # -- rendering -------------------------------------------------------
 
+    def _sampler(self, binding: Any) -> Any:
+        """A sampler object for one filter/wrap combination, created on demand."""
+        key = (binding.filter, binding.wrap)
+        sampler = self._samplers.get(key)
+        if sampler is None:
+            sampler = self.ctx.sampler()
+            if binding.filter == "nearest":
+                sampler.filter = (self.ctx.NEAREST, self.ctx.NEAREST)
+            elif binding.filter == "mipmap":
+                sampler.filter = (self.ctx.LINEAR_MIPMAP_LINEAR, self.ctx.LINEAR)
+            else:
+                sampler.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+            repeat = binding.wrap == "repeat"
+            sampler.repeat_x = repeat
+            sampler.repeat_y = repeat
+            self._samplers[key] = sampler
+        return sampler
+
     def _bind_channels(
         self, rp: _Pass, frame: int, state: InputState
     ) -> list[tuple[int, int, int]]:
@@ -341,20 +361,17 @@ class Renderer:
                         "which failed to compile"
                     )
                 texture = source.target.read_texture
-                # Buffer sampling honours the binding's filter/wrap settings.
-                if binding.filter == "nearest":
-                    texture.filter = (self.ctx.NEAREST, self.ctx.NEAREST)
-                elif binding.filter == "mipmap":
-                    texture.filter = (
-                        self.ctx.LINEAR_MIPMAP_LINEAR,
-                        self.ctx.LINEAR,
-                    )
-                else:
-                    texture.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
-                repeat = binding.wrap == "repeat"
-                texture.repeat_x = repeat
-                texture.repeat_y = repeat
-                size = source.target.size
+                # Buffers must be sampled through a sampler object, not by
+                # mutating the texture. Filter and wrap live on the *texture* in
+                # GL, so two channels reading the same buffer with different
+                # filters would silently share one setting -- and a buffer read
+                # by several passes is exactly the normal case.
+                sampler = self._sampler(binding)
+                sampler.texture = texture
+                sampler.use(index)
+                _set_uniform(rp.program, f"iChannel{index}", index)
+                resolutions[index] = (*source.target.size, 1)
+                continue
             elif binding.is_keyboard:
                 texture = self.channels.keyboard(state)
                 size = texture.size
