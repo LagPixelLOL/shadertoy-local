@@ -232,6 +232,18 @@ class TestMultiGpuRanking:
 class TestDeviceFallback:
     """create_context must try the next candidate when one cannot be bound."""
 
+    @pytest.fixture(autouse=True)
+    def _hermetic_env(self, monkeypatch):
+        """These tests drive selection directly with a stubbed driver, so the
+        ambient SHADERTOY_* steering used to pin the suite to one device must not
+        leak in and change what is attempted."""
+        for name in (
+            "SHADERTOY_DEVICE",
+            "SHADERTOY_ALLOW_SOFTWARE",
+            "SHADERTOY_BACKEND",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
     def _fake_devices(self, monkeypatch, devices):
         import shadertoy_local.context as ctxmod
 
