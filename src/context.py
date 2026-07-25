@@ -199,12 +199,24 @@ def enumerate_devices() -> list[DeviceInfo]:
     return devices
 
 
-def select_device(
-    devices: list[DeviceInfo], requested: int | None = None, allow_software: bool = False
-) -> DeviceInfo | None:
-    """Pick a device, preferring hardware unless told otherwise."""
+def rank_devices(
+    devices: list[DeviceInfo],
+    requested: int | None = None,
+    allow_software: bool = False,
+) -> list[DeviceInfo]:
+    """Return candidate devices, best first.
+
+    Enumerating a device is not a promise that it can be bound: on multi-GPU
+    hosts a card may be MIG-partitioned, in compute-exclusive mode, or simply
+    out of memory. Returning an ordered list rather than a single choice lets
+    the caller fall through to the next one.
+
+    An explicit *requested* index yields exactly that device and never a
+    substitute -- silently rendering on different hardware than asked for would
+    invalidate any measurement taken.
+    """
     if not devices:
-        return None
+        return []
     if requested is not None:
         matches = [d for d in devices if d.index == requested]
         if not matches:
@@ -212,16 +224,24 @@ def select_device(
             raise ContextError(
                 f"EGL device index {requested} does not exist (available: {available})"
             )
-        return matches[0]
+        return matches
 
-    hardware = [d for d in devices if not d.is_software]
-    if hardware:
-        # A CUDA-capable device is the most likely intended GPU.
-        hardware.sort(key=lambda d: (not d.is_nvidia, d.index))
-        return hardware[0]
-    if allow_software:
-        return devices[0]
-    return None
+    # Hardware first. Among hardware, a CUDA-capable device is the most likely
+    # intended GPU; ties break on index so ordering is deterministic.
+    hardware = sorted(
+        (d for d in devices if not d.is_software),
+        key=lambda d: (not d.is_nvidia, d.index),
+    )
+    software = sorted((d for d in devices if d.is_software), key=lambda d: d.index)
+    return hardware + (software if allow_software else [])
+
+
+def select_device(
+    devices: list[DeviceInfo], requested: int | None = None, allow_software: bool = False
+) -> DeviceInfo | None:
+    """Pick the single best device, preferring hardware unless told otherwise."""
+    ranked = rank_devices(devices, requested, allow_software)
+    return ranked[0] if ranked else None
 
 
 # --------------------------------------------------------------------------
@@ -290,40 +310,47 @@ def create_context(
     if os.environ.get("SHADERTOY_ALLOW_SOFTWARE") == "1":
         allow_software = True
 
-    device: DeviceInfo | None = None
     kwargs: dict[str, Any] = {"standalone": True}
     if backend:
         kwargs["backend"] = backend
 
+    # `None` means "let the backend choose" (used by GLX, and by EGL when device
+    # enumeration is unavailable).
+    candidates: list[DeviceInfo | None] = [None]
     if backend == "egl":
         devices = enumerate_devices()
         if devices:
-            device = select_device(devices, device_index, allow_software)
-            if device is None:
+            ranked = rank_devices(devices, device_index, allow_software)
+            if not ranked:
                 listing = "\n  ".join(f"[{d.index}] {d.label}" for d in devices)
                 raise ContextError(
                     "Only software EGL devices were found; refusing to render on a\n"
                     "CPU rasterizer. Pass --allow-software to override.\n"
                     f"  {listing}"
                 )
-            kwargs["device_index"] = device.index
+            candidates = list(ranked)
 
     versions = (require,) if require else _VERSION_LADDER
     errors: list[str] = []
-    for version in versions:
-        try:
-            ctx = moderngl.create_context(require=version, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - driver errors are arbitrary
-            errors.append(f"require={version}: {exc}")
-            continue
-        # moderngl caches Context.info on first access, and the query reads
-        # whichever context is *current*. Touch it now, while this context is
-        # guaranteed current, or a later context would poison the cache and make
-        # to_dict() report another device's renderer entirely.
-        _ = ctx.info
-        return ContextHandle(
-            ctx=ctx, device=device, backend=backend, version_code=ctx.version_code
-        )
+    for device in candidates:
+        attempt = dict(kwargs)
+        if device is not None:
+            attempt["device_index"] = device.index
+        where = f"device {device.index}" if device is not None else "default device"
+        for version in versions:
+            try:
+                ctx = moderngl.create_context(require=version, **attempt)
+            except Exception as exc:  # noqa: BLE001 - driver errors are arbitrary
+                errors.append(f"{where}, require={version}: {exc}")
+                continue
+            # moderngl caches Context.info on first access, and the query reads
+            # whichever context is *current*. Touch it now, while this context is
+            # guaranteed current, or a later context would poison the cache and
+            # make to_dict() report another device's renderer entirely.
+            _ = ctx.info
+            return ContextHandle(
+                ctx=ctx, device=device, backend=backend, version_code=ctx.version_code
+            )
 
     detail = "\n  ".join(errors)
     hint = _egl_setup_hint() if backend == "egl" else ""

@@ -112,6 +112,34 @@ class TestRealEnumeration:
         devices = enumerate_devices()
         assert [d.index for d in devices] == list(range(len(devices)))
 
+    def test_software_flag_agrees_with_the_renderer_string(self):
+        """Cross-check capability detection against the driver's self-report.
+
+        `is_software` keys off EGL_MESA_device_software, which is how devices are
+        classified before any context exists. If that ever disagreed with the
+        actual GL_RENDERER, auto-selection could quietly land on a CPU
+        rasterizer.
+        """
+        from shadertoy_local.context import ContextError, create_context
+
+        known_software = ("llvmpipe", "softpipe", "swrast", "swiftshader")
+        for dev in enumerate_devices():
+            try:
+                handle = create_context(
+                    device_index=dev.index, allow_software=True
+                )
+            except ContextError:
+                continue
+            try:
+                renderer = handle.ctx.info["GL_RENDERER"].lower()
+            finally:
+                handle.release()
+            looks_software = any(name in renderer for name in known_software)
+            assert dev.is_software == looks_software, (
+                f"device {dev.index} ({renderer}) flagged "
+                f"is_software={dev.is_software}"
+            )
+
 
 @pytest.mark.gpu
 @pytest.mark.cpu
@@ -148,3 +176,129 @@ class TestMultipleContexts:
         assert clear_and_read(gl_context, 0.25) == pytest.approx(0.25)
         assert clear_and_read(software_context, 0.75) == pytest.approx(0.75)
         assert clear_and_read(gl_context, 0.5) == pytest.approx(0.5)
+
+
+class TestMultiGpuRanking:
+    """Ordering on hosts with several GPUs. Enumerating a device is not a
+    promise it can be bound, so ranking must produce a usable fallback order."""
+
+    def test_two_nvidia_gpus_prefer_lowest_index(self):
+        from shadertoy_local.context import rank_devices
+
+        devices = _devices((0, NVIDIA), (1, NVIDIA))
+        assert [d.index for d in rank_devices(devices)] == [0, 1]
+
+    def test_nvidia_outranks_other_hardware_regardless_of_order(self):
+        from shadertoy_local.context import rank_devices
+
+        devices = _devices((0, GENERIC), (1, NVIDIA), (2, GENERIC))
+        assert [d.index for d in rank_devices(devices)] == [1, 0, 2]
+
+    def test_software_is_excluded_from_ranking_by_default(self):
+        from shadertoy_local.context import rank_devices
+
+        devices = _devices((0, SOFTWARE), (1, NVIDIA), (2, GENERIC))
+        assert [d.index for d in rank_devices(devices)] == [1, 2]
+
+    def test_software_ranks_last_when_allowed(self):
+        from shadertoy_local.context import rank_devices
+
+        devices = _devices((0, SOFTWARE), (1, GENERIC), (2, NVIDIA))
+        ranked = rank_devices(devices, allow_software=True)
+        assert [d.index for d in ranked] == [2, 1, 0]
+        assert ranked[-1].is_software, "a CPU rasterizer must never outrank a GPU"
+
+    def test_multiple_software_devices_keep_index_order(self):
+        from shadertoy_local.context import rank_devices
+
+        devices = _devices((0, SOFTWARE), (1, SOFTWARE))
+        assert [d.index for d in rank_devices(devices, allow_software=True)] == [0, 1]
+
+    def test_explicit_request_yields_exactly_one_candidate(self):
+        """An explicit --device must never silently fall back to other hardware:
+        a measurement taken on a substituted GPU would be meaningless."""
+        from shadertoy_local.context import rank_devices
+
+        devices = _devices((0, NVIDIA), (1, NVIDIA), (2, SOFTWARE))
+        assert [d.index for d in rank_devices(devices, requested=1)] == [1]
+
+    def test_all_hardware_only_no_software_available(self):
+        from shadertoy_local.context import rank_devices
+
+        devices = _devices((0, NVIDIA), (1, GENERIC))
+        assert len(rank_devices(devices, allow_software=True)) == 2
+
+
+class TestDeviceFallback:
+    """create_context must try the next candidate when one cannot be bound."""
+
+    def _fake_devices(self, monkeypatch, devices):
+        import shadertoy_local.context as ctxmod
+
+        monkeypatch.setattr(ctxmod, "enumerate_devices", lambda: devices)
+
+    def _fake_driver(self, monkeypatch, failing: set[int]):
+        """Stub moderngl.create_context, failing for the given device indices."""
+        import moderngl
+
+        class FakeInfo(dict):
+            pass
+
+        class FakeCtx:
+            def __init__(self, index):
+                self.device_index = index
+                self.version_code = 460
+                self.info = FakeInfo({"GL_RENDERER": f"fake-{index}"})
+
+            def release(self):
+                pass
+
+        def fake_create(**kwargs):
+            index = kwargs.get("device_index")
+            if index in failing:
+                raise RuntimeError(f"cannot bind device {index}")
+            return FakeCtx(index)
+
+        monkeypatch.setattr(moderngl, "create_context", fake_create)
+
+    def test_falls_through_to_the_second_gpu(self, monkeypatch):
+        from shadertoy_local.context import create_context
+
+        self._fake_devices(monkeypatch, _devices((0, NVIDIA), (1, NVIDIA)))
+        self._fake_driver(monkeypatch, failing={0})
+        handle = create_context()
+        assert handle.device is not None and handle.device.index == 1
+
+    def test_reports_every_failure_when_all_devices_fail(self, monkeypatch):
+        from shadertoy_local.context import ContextError, create_context
+
+        self._fake_devices(monkeypatch, _devices((0, NVIDIA), (1, GENERIC)))
+        self._fake_driver(monkeypatch, failing={0, 1})
+        with pytest.raises(ContextError) as excinfo:
+            create_context()
+        message = str(excinfo.value)
+        assert "device 0" in message and "device 1" in message
+
+    def test_explicit_device_does_not_fall_back(self, monkeypatch):
+        from shadertoy_local.context import ContextError, create_context
+
+        self._fake_devices(monkeypatch, _devices((0, NVIDIA), (1, NVIDIA)))
+        self._fake_driver(monkeypatch, failing={0})
+        with pytest.raises(ContextError):
+            create_context(device_index=0)
+
+    def test_does_not_fall_back_to_software_unless_allowed(self, monkeypatch):
+        from shadertoy_local.context import ContextError, create_context
+
+        self._fake_devices(monkeypatch, _devices((0, NVIDIA), (1, SOFTWARE)))
+        self._fake_driver(monkeypatch, failing={0})
+        with pytest.raises(ContextError):
+            create_context()
+
+    def test_falls_back_to_software_when_allowed(self, monkeypatch):
+        from shadertoy_local.context import create_context
+
+        self._fake_devices(monkeypatch, _devices((0, NVIDIA), (1, SOFTWARE)))
+        self._fake_driver(monkeypatch, failing={0})
+        handle = create_context(allow_software=True)
+        assert handle.device is not None and handle.device.index == 1
