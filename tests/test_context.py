@@ -116,7 +116,9 @@ class TestRealEnumeration:
 @pytest.mark.gpu
 @pytest.mark.cpu
 class TestMultipleContexts:
-    def test_each_handle_reports_its_own_device(self, gl_context, software_context):
+    def test_each_handle_reports_its_own_device(
+        self, gl_context, software_context, auto_device_only
+    ):
         """Regression: moderngl caches Context.info on first access and the query
         reads whichever context is current, so a lazily-read handle could report
         a different device's renderer -- and claim software=False for llvmpipe."""

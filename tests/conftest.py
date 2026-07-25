@@ -105,3 +105,19 @@ def software_context():
         pytest.skip(f"could not create software context: {exc}")
     yield handle
     handle.release()
+
+
+@pytest.fixture
+def auto_device_only():
+    """Skip tests whose premise is that hardware is auto-selected.
+
+    Setting SHADERTOY_DEVICE pins a specific device, which is useful for running
+    the whole suite against a software rasterizer to catch driver differences --
+    but it necessarily invalidates assertions about automatic selection.
+    """
+    import os
+
+    if os.environ.get("SHADERTOY_DEVICE") is not None:
+        pytest.skip("device pinned via SHADERTOY_DEVICE")
+    if os.environ.get("SHADERTOY_ALLOW_SOFTWARE") == "1":
+        pytest.skip("software fallback forced via SHADERTOY_ALLOW_SOFTWARE")

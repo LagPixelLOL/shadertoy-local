@@ -207,7 +207,17 @@ def _set_uniform(program: Any, name: str, value: Any) -> None:
     except Exception:
         # Arrays and some vector types must go through write().
         array = np.asarray(value, dtype="f4")
-        uniform.write(array.tobytes())
+        # Drivers disagree about how many elements of an array uniform they
+        # expose: NVIDIA reports the full declared length, while Mesa trims it
+        # to the elements the shader actually indexes. Writing more bytes than
+        # the program expects fails with "invalid uniform size", so clamp to
+        # whatever this program says it has. A shader using only
+        # iChannelResolution[0] is extremely common, which makes this the
+        # difference between working and crashing on Mesa.
+        length = getattr(uniform, "array_length", None) or 1
+        if array.ndim >= 1 and array.shape[0] > length:
+            array = array[:length]
+        uniform.write(np.ascontiguousarray(array).tobytes())
 
 
 class Renderer:

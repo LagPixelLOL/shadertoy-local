@@ -263,3 +263,55 @@ class TestCrossBackendAgreement:
                 r2.release()
         finally:
             r1.release()
+
+
+class TestArrayUniformTrimming:
+    """Regression: Mesa reports an array uniform's length as the number of
+    elements the shader actually indexes, while NVIDIA reports the full declared
+    length. Writing the full array to a trimmed uniform fails with
+    'invalid uniform size' -- which broke the very common iChannelResolution[0]
+    pattern on every Mesa driver.
+    """
+
+    def _run(self, make_project, handle, body):
+        source = (
+            "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+            f"    {body}\n"
+            "}\n"
+        )
+        root = make_project(
+            {"image.glsl": source},
+            config={"image": {"channels": {"0": "checker", "1": "uv"}}},
+        )
+        capture, renderer = _render(root, handle)
+        try:
+            return capture.images["image"][0, 0].copy()
+        finally:
+            renderer.release()
+
+    def test_single_element_index(self, make_project, software_context):
+        pixel = self._run(
+            make_project,
+            software_context,
+            "fragColor = vec4(iChannelResolution[0].x / 1000.0, 0, 0, 1);",
+        )
+        assert pixel[0] == pytest.approx(0.256, abs=1e-4)
+
+    def test_all_elements_indexed(self, make_project, software_context):
+        pixel = self._run(
+            make_project,
+            software_context,
+            "fragColor = vec4((iChannelResolution[0].x + iChannelResolution[1].x\n"
+            "        + iChannelResolution[2].x + iChannelResolution[3].x) / 1000.0,"
+            " 0, 0, 1);",
+        )
+        # Channels 0 and 1 are bound (256 each); 2 and 3 are unbound (0).
+        assert pixel[0] == pytest.approx(0.512, abs=1e-4)
+
+    def test_channel_time_array(self, make_project, software_context):
+        pixel = self._run(
+            make_project,
+            software_context,
+            "fragColor = vec4(iChannelTime[0], 0, 0, 1);",
+        )
+        assert pixel[0] == pytest.approx(0.0)

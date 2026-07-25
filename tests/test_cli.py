@@ -413,7 +413,9 @@ class TestDeviceSelection:
         return code, payload
 
     @pytest.mark.gpu
-    def test_defaults_to_hardware(self, capsys, make_project, simple_image):
+    def test_defaults_to_hardware(
+        self, capsys, make_project, simple_image, auto_device_only
+    ):
         root = make_project({"image.glsl": simple_image})
         code, payload = self._renderer(capsys, root)
         assert code == EXIT_OK
@@ -421,7 +423,7 @@ class TestDeviceSelection:
 
     @pytest.mark.gpu
     def test_allow_software_does_not_override_hardware(
-        self, capsys, make_project, simple_image
+        self, capsys, make_project, simple_image, auto_device_only
     ):
         root = make_project({"image.glsl": simple_image})
         code, payload = self._renderer(capsys, root, "--allow-software")

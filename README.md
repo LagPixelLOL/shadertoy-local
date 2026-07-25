@@ -295,6 +295,24 @@ pytest                    # everything
 pytest -m "not gpu"       # logic only, no GPU needed
 ```
 
+The suite is split by marker: ~180 tests are pure logic, the rest are marked
+`gpu` (skipped when no device is available) or `cpu` (skipped when no software
+rasterizer is available). The `cpu` set is a deliberate subset — enough to cover
+the GPU-less path and, more usefully, to check the diagnostic parser against a
+*real* Mesa compiler rather than a hand-written sample.
+
+Because driver behaviour genuinely differs, the whole suite can be pointed at a
+software rasterizer to catch it:
+
+```bash
+SHADERTOY_DEVICE=1 SHADERTOY_ALLOW_SOFTWARE=1 pytest
+```
+
+That costs about 0.5 s extra. It is worth running before a release: it is how a
+crash on every Mesa driver was found, where Mesa reports an array uniform's
+length as the number of elements the shader indexes while NVIDIA reports the
+full declared length.
+
 ## License
 
 MIT

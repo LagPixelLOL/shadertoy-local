@@ -34,7 +34,16 @@ def _render(root, gl_context, **kwargs):
 class TestContext:
     def test_hardware_is_preferred_over_software(self, gl_context):
         """llvmpipe is often enumerated first; picking it would be a silent
-        100x slowdown."""
+        100x slowdown.
+
+        Skipped when a device is pinned explicitly, so the whole suite can be
+        pointed at a software rasterizer for cross-driver checks. The selection
+        logic itself is covered deterministically in test_context.py.
+        """
+        import os
+
+        if os.environ.get("SHADERTOY_DEVICE") is not None:
+            pytest.skip("device pinned via SHADERTOY_DEVICE")
         if gl_context.device is not None:
             assert not gl_context.device.is_software
 
