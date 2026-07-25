@@ -30,3 +30,6 @@ package-dir = { shadertoy_local = "src" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gpu: requires a working GL context (skipped when no device is available)",
+]

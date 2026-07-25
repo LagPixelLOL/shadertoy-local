@@ -182,11 +182,16 @@ def run_probe(array: np.ndarray, probe: Probe) -> dict[str, Any]:
     height, width = array.shape[:2]
     x, y = probe.resolve(width, height)
     pixel = array[y, x]
+    # Non-finite values cannot be rounded to an integer, so sanitise for the
+    # 8-bit view only; the float view and the `finite` flag keep the truth.
+    displayable = np.nan_to_num(
+        np.asarray(pixel, dtype=np.float64), nan=0.0, posinf=1.0, neginf=0.0
+    )
     result: dict[str, Any] = {
         "x": x,
         "y": y,
         "rgba": [float(v) for v in pixel],
-        "rgba8": [int(np.clip(round(float(v) * 255), 0, 255)) for v in pixel],
+        "rgba8": [int(np.clip(round(float(v) * 255), 0, 255)) for v in displayable],
         "finite": bool(np.isfinite(pixel).all()),
     }
     if probe.expect is not None:

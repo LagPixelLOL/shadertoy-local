@@ -34,17 +34,23 @@ class _Reporter:
         self.quiet = quiet
 
     def say(self, text: str = "") -> None:
+        """Informational prose; hidden by --quiet and --json."""
         if not self.quiet and not self.as_json:
             print(text, file=sys.stderr)
 
     def warn(self, text: str) -> None:
-        if not self.as_json:
-            print(text, file=sys.stderr)
+        """Errors and failures; always shown, so --json still explains itself."""
+        print(text, file=sys.stderr)
 
     def emit(self, payload: dict[str, Any]) -> None:
         if self.as_json:
             json.dump(payload, sys.stdout, indent=2, sort_keys=False)
             sys.stdout.write("\n")
+
+
+def _fmt(value: float | None, spec: str = ".6g") -> str:
+    """Format a number that may be None (an all-NaN channel has no min/max)."""
+    return "n/a" if value is None else format(value, spec)
 
 
 # --------------------------------------------------------------------------
@@ -622,12 +628,16 @@ def cmd_render(args: argparse.Namespace) -> int:
                 for probe in item.get("probes", []):
                     if "passed" in probe:
                         mark = "ok" if probe["passed"] else "FAIL"
-                        report.warn(
+                        line = (
                             f"  probe ({probe['x']},{probe['y']}) {mark}: "
                             f"got {[round(v,4) for v in probe['rgba']]} "
                             f"expected {probe['expected']} "
                             f"(max diff {probe['max_diff']:.5f})"
                         )
+                        if probe["passed"]:
+                            report.say(line)
+                        else:
+                            report.warn(line)
         report.say(f"  total gpu time {total_ms:.3f} ms")
 
         ok = failures == 0
@@ -723,7 +733,11 @@ def cmd_probe(args: argparse.Namespace) -> int:
                     )
                 if not result["finite"]:
                     line += "  [NON-FINITE]"
-                report.warn(line)
+                # A failed assertion is reportable even under --json.
+                if result.get("passed") is False:
+                    report.warn(line)
+                else:
+                    report.say(line)
 
         payload["ok"] = failures == 0
         payload["failures"] = failures
@@ -767,21 +781,22 @@ def cmd_stats(args: argparse.Namespace) -> int:
                 stats["histogram"] = histogram(array, bins=args.bins)
             payload["passes"][name] = stats
 
-            report.warn(f"{name}: {stats['width']}x{stats['height']}")
+            report.say(f"{name}: {stats['width']}x{stats['height']}")
             for channel in ("r", "g", "b", "a"):
                 info = stats["channels"][channel]
-                report.warn(
-                    f"  {channel}: min {info['min']:.6g}  max {info['max']:.6g}  "
-                    f"mean {info['mean']:.6g}"
+                report.say(
+                    f"  {channel}: min {_fmt(info['min'])}  "
+                    f"max {_fmt(info['max'])}  mean {_fmt(info['mean'])}"
                 )
-            report.warn(
-                f"  luma mean {stats['luma']['mean']:.6g}  "
+            report.say(
+                f"  luma mean {_fmt(stats['luma']['mean'])}  "
                 f"unique colours {stats['unique_colors']}  "
                 f"clipped {stats['fraction_clipped'] * 100:.2f}%"
             )
             if stats["has_nan"] or stats["has_inf"]:
                 report.warn(
-                    f"  non-finite: {stats['nan_count']} NaN, {stats['inf_count']} Inf"
+                    f"  {name}: non-finite values present -- "
+                    f"{stats['nan_count']} NaN, {stats['inf_count']} Inf"
                 )
 
             # Assertions: these are what let a CI job fail on a broken shader.
