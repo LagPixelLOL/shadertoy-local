@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 # EGL enums we need (avoids a hard dependency on any EGL header/binding).

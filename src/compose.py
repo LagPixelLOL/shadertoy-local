@@ -22,8 +22,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
-
 from .project import PassSpec, Project, ProjectError
 
 #: GLSL 330 core is the desktop equivalent of Shadertoy's GLSL ES 3.0.

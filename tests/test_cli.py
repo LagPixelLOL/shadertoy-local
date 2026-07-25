@@ -11,7 +11,6 @@ import json
 import pytest
 
 from shadertoy_local.cli import (
-    EXIT_ENVIRONMENT,
     EXIT_FAILED,
     EXIT_OK,
     EXIT_USAGE,

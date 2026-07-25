@@ -10,8 +10,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from shadertoy_local.compose import compose_pass
-from shadertoy_local.diagnostics import parse_log
 from shadertoy_local.inputs import KeyboardState, MouseState
 from shadertoy_local.project import load_project
 from shadertoy_local.renderer import (

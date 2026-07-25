@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from shadertoy_local.compose import ComposedShader, Origin, compose_pass
 from shadertoy_local.diagnostics import (
     Diagnostic,
