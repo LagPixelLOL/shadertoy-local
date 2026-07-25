@@ -73,8 +73,6 @@ class RenderSettings:
     fps: float = 60.0
     #: Target frame index to capture.
     frame: int = 0
-    #: Explicit ``iTime`` override; when None, derived from frame/fps.
-    time: float | None = None
     #: One timeline covering pointer and keyboard together, evaluated per frame.
     inputs: InputTimeline = field(default_factory=InputTimeline.empty)
     date: tuple[float, float, float, float] = DEFAULT_DATE
@@ -86,11 +84,14 @@ class RenderSettings:
     max_frames: int = DEFAULT_MAX_FRAMES
 
     def time_at(self, frame: int) -> float:
-        if self.time is not None:
-            # An explicit time pins the captured frame; earlier simulated frames
-            # still advance normally so feedback remains coherent.
-            if frame == self.frame:
-                return self.time
+        """``iTime`` for a frame, which is only ever the frame index over fps.
+
+        There is deliberately no override. A pinned time would have to disagree
+        with either ``iFrame`` or ``iTimeDelta`` -- both are derived from the same
+        index -- and a shader reading two of the three would see an inconsistent
+        set. Choose the moment with ``--frame`` (and ``--fps`` if the grid is
+        wrong), which moves all three together.
+        """
         return frame / self.fps if self.fps else 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -99,7 +100,6 @@ class RenderSettings:
             "height": self.height,
             "fps": self.fps,
             "frame": self.frame,
-            "time": self.time,
             "precharge": self.precharge,
             "inputs": self.inputs.to_dict(),
             "date": list(self.date),

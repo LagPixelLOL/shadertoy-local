@@ -112,13 +112,6 @@ def _add_frame_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="frame index to render (default: 0)",
     )
-    group.add_argument(
-        "-t",
-        "--time",
-        type=float,
-        default=None,
-        help="override iTime in seconds for the captured frame",
-    )
     group.add_argument("--fps", type=float, default=None, help="frame rate (default: 60)")
     group.add_argument(
         "--precharge",
@@ -298,7 +291,6 @@ def _build_settings(args: argparse.Namespace, project: Any) -> Any:
         height=int(height),
         fps=float(fps),
         frame=int(frame),
-        time=getattr(args, "time", None),
         inputs=timeline,
         date=date,
         precharge=precharge,

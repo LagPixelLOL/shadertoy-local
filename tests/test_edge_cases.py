@@ -702,15 +702,14 @@ class TestRenderEdges:
         finally:
             renderer.release()
 
-    def test_time_override_applies_only_to_the_captured_frame(
-        self, make_project, gl_context
-    ):
+    def test_time_is_the_frame_index_over_fps(self, make_project, gl_context):
+        """The only source of iTime. There is no override; see time_at."""
         source = "void mainImage(out vec4 c, in vec2 f){ c = vec4(iTime,0,0,1); }\n"
         capture, renderer = self._render(
-            make_project({"image.glsl": source}), gl_context, frame=10, time=42.0
+            make_project({"image.glsl": source}), gl_context, frame=10, fps=25.0
         )
         try:
-            assert capture.images["image"][0, 0, 0] == pytest.approx(42.0)
+            assert capture.images["image"][0, 0, 0] == pytest.approx(10 / 25.0)
         finally:
             renderer.release()
 
@@ -797,21 +796,33 @@ class TestCliEdges:
         assert code == 0
         assert payload["ok"] is True
 
-    def test_time_and_count_together(self, capsys, make_project):
-        """--time pins only the first captured frame; the rest advance normally."""
+    def test_every_captured_frame_gets_its_own_time(self, capsys, make_project):
+        """Each capture in a --count run is timed by its own frame index."""
         source = "void mainImage(out vec4 c, in vec2 f){ c = vec4(iTime,0,0,1); }\n"
         root = make_project({"image.glsl": source})
         code, payload, _ = _run(
             capsys, "render", "-C", str(root), "-r", "4x4", "--no-write",
-            "--count", "2", "--every", "6", "--time", "9.0", "--stats", "--json",
+            "--count", "2", "--every", "6", "--frame", "3", "--stats", "--json",
         )
         assert code == 0
         maxima = [
             f["passes"]["image"]["stats"]["channels"]["r"]["max"]
             for f in payload["frames"]
         ]
-        assert maxima[0] == pytest.approx(9.0)
-        assert maxima[1] == pytest.approx(6 / 60)
+        assert maxima[0] == pytest.approx(3 / 60)
+        assert maxima[1] == pytest.approx(9 / 60)
+
+    def test_there_is_no_time_override_flag(self, capsys, make_project):
+        """Pinning iTime is not offered, and reintroducing it needs this deleted.
+
+        It could only ever disagree with iFrame and iTimeDelta, which come from
+        the frame index; --frame and --fps move all three together instead.
+        """
+        root = make_project({"image.glsl": IMAGE})
+        with pytest.raises(SystemExit) as excinfo:
+            _run(capsys, "render", "-C", str(root), "--no-write", "--time", "9.0")
+        assert excinfo.value.code == 2
+        assert "unrecognized arguments: --time" in capsys.readouterr().err
 
     def test_invalid_json_on_stdin(self, capsys, make_project, monkeypatch):
         import io
