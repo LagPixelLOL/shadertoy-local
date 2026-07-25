@@ -361,11 +361,12 @@ class Renderer:
                         "which failed to compile"
                     )
                 texture = source.target.read_texture
-                # Buffers must be sampled through a sampler object, not by
-                # mutating the texture. Filter and wrap live on the *texture* in
-                # GL, so two channels reading the same buffer with different
-                # filters would silently share one setting -- and a buffer read
-                # by several passes is exactly the normal case.
+                # Bound through a sampler object rather than by mutating the
+                # texture. The project loader guarantees every reference to a
+                # buffer requests identical settings -- shadertoy.com stores them
+                # on the buffer, not the channel -- so this cannot diverge from
+                # the site; it simply avoids order-dependent mutation of state
+                # shared between passes.
                 sampler = self._sampler(binding)
                 sampler.texture = texture
                 sampler.use(index)

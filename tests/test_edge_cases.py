@@ -903,15 +903,16 @@ class TestCliEdges:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.gpu
-class TestSamplerIndependence:
-    """Filter and wrap live on the GL *texture*, not the texture unit, so two
-    channels reading one buffer would share a single setting unless sampler
-    objects are used. A buffer read by several channels is the normal case, so
-    this silently produced the wrong filter."""
+class TestBufferSamplerSettingsAreSharedPerBuffer:
+    """On shadertoy.com a buffer's filter and wrap belong to the *buffer*, not to
+    the channel reading it: changing them on one reference changes every
+    reference, because GL stores sampler state on the texture object.
 
-    # A 2x2 checker in a quarter-scale buffer, sampled exactly between texels:
-    # nearest snaps to a corner (0.0), linear interpolates (0.5).
+    A config asking for two different settings for one buffer is therefore
+    inexpressible on the real site. It is rejected rather than resolved in favour
+    of whichever binding happens to be applied last.
+    """
+
     CHECKER = (
         "void mainImage(out vec4 c, in vec2 f){\n"
         "    vec2 g = floor(f / (iResolution.xy / 2.0));\n"
@@ -925,39 +926,22 @@ class TestSamplerIndependence:
         "}\n"
     )
 
-    def _render(self, root, gl_context):
-        from shadertoy_local.renderer import Renderer, RenderSettings
-
-        renderer = Renderer(
-            load_project(root), gl_context.ctx, RenderSettings(width=64, height=64)
-        )
-        renderer.compile()
-        try:
-            return renderer.render_frame().images["image"][1, 1].copy()
-        finally:
-            renderer.release()
-
-    def test_one_buffer_two_filters_on_one_pass(self, make_project, gl_context):
+    def test_conflicting_filters_on_one_pass_are_rejected(self, make_project):
         root = make_project(
             {"buffer_a.glsl": self.CHECKER, "image.glsl": self.TWO_CHANNELS},
             config={
-                "buffer_a": {"scale": 0.25},
                 "image": {
                     "channels": {
                         "0": {"type": "buffer", "source": "buffer_a", "filter": "nearest"},
                         "1": {"type": "buffer", "source": "buffer_a", "filter": "linear"},
                     }
-                },
+                }
             },
         )
-        pixel = self._render(root, gl_context)
-        assert pixel[0] == pytest.approx(0.0), "channel 0 asked for nearest"
-        assert pixel[1] == pytest.approx(0.5), "channel 1 asked for linear"
+        with pytest.raises(ProjectError, match="belong to the buffer"):
+            load_project(root)
 
-    def test_one_buffer_different_filters_across_passes(
-        self, make_project, gl_context
-    ):
-        """buffer_b reads buffer_a with nearest while image reads it with linear."""
+    def test_conflicting_filters_across_passes_are_rejected(self, make_project):
         root = make_project(
             {
                 "buffer_a.glsl": self.CHECKER,
@@ -969,40 +953,25 @@ class TestSamplerIndependence:
                 "image.glsl": self.TWO_CHANNELS,
             },
             config={
-                "buffer_a": {"scale": 0.25},
                 "buffer_b": {
-                    "scale": 0.25,
                     "channels": {
                         "0": {"type": "buffer", "source": "buffer_a", "filter": "nearest"}
-                    },
+                    }
                 },
                 "image": {
                     "channels": {
                         "0": {"type": "buffer", "source": "buffer_a", "filter": "linear"},
-                        "1": {"type": "buffer", "source": "buffer_b", "filter": "nearest"},
+                        "1": {"type": "buffer", "source": "buffer_b"},
                     }
                 },
             },
         )
-        pixel = self._render(root, gl_context)
-        assert pixel[0] == pytest.approx(0.5), "image read buffer_a with linear"
-        assert pixel[1] == pytest.approx(0.0), "buffer_b read buffer_a with nearest"
+        with pytest.raises(ProjectError, match="every reference"):
+            load_project(root)
 
-    def test_wrap_is_also_independent(self, make_project, gl_context):
-        """Sampling outside [0,1]: clamp holds the edge, repeat tiles."""
-        gradient = (
-            "void mainImage(out vec4 c, in vec2 f){\n"
-            "    c = vec4(f.x / iResolution.x);\n"
-            "}\n"
-        )
-        sample = (
-            "void mainImage(out vec4 c, in vec2 f){\n"
-            "    c = vec4(texture(iChannel0, vec2(1.25, 0.5)).r,\n"
-            "             texture(iChannel1, vec2(1.25, 0.5)).r, 0.0, 1.0);\n"
-            "}\n"
-        )
+    def test_conflicting_wrap_is_rejected(self, make_project):
         root = make_project(
-            {"buffer_a.glsl": gradient, "image.glsl": sample},
+            {"buffer_a.glsl": self.CHECKER, "image.glsl": self.TWO_CHANNELS},
             config={
                 "image": {
                     "channels": {
@@ -1012,9 +981,140 @@ class TestSamplerIndependence:
                 }
             },
         )
-        pixel = self._render(root, gl_context)
-        assert pixel[0] > 0.9, "clamp holds the right edge"
-        assert pixel[1] < 0.4, "repeat wraps back to a quarter across"
+        with pytest.raises(ProjectError, match="belong to the buffer"):
+            load_project(root)
+
+    def test_the_error_names_both_offending_channels(self, make_project):
+        root = make_project(
+            {"buffer_a.glsl": self.CHECKER, "image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a", "filter": "nearest"},
+                        "1": {"type": "buffer", "source": "buffer_a", "filter": "mipmap"},
+                    }
+                }
+            },
+        )
+        with pytest.raises(ProjectError) as excinfo:
+            load_project(root)
+        message = str(excinfo.value)
+        assert "channel0" in message and "channel1" in message
+        assert "nearest" in message and "mipmap" in message
+
+    def test_matching_settings_everywhere_are_accepted(self, make_project):
+        root = make_project(
+            {"buffer_a.glsl": self.CHECKER, "image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a", "filter": "nearest"},
+                        "1": {"type": "buffer", "source": "buffer_a", "filter": "nearest"},
+                    }
+                }
+            },
+        )
+        project = load_project(root)
+        assert all(
+            b.filter == "nearest" for b in project.passes["image"].channels.values()
+        )
+
+    def test_defaults_do_not_collide_with_an_explicit_match(self, make_project):
+        """One reference stating the default explicitly must not look like a
+        conflict against another that omits it."""
+        root = make_project(
+            {"buffer_a.glsl": self.CHECKER, "image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": "buffer_a",
+                        "1": {"type": "buffer", "source": "buffer_a",
+                              "filter": "linear", "wrap": "clamp"},
+                    }
+                }
+            },
+        )
+        assert load_project(root) is not None
+
+    def test_different_buffers_may_differ(self, make_project):
+        """The constraint is per buffer, not global."""
+        root = make_project(
+            {
+                "buffer_a.glsl": self.CHECKER,
+                "buffer_b.glsl": self.CHECKER,
+                "image.glsl": self.TWO_CHANNELS,
+            },
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a", "filter": "nearest"},
+                        "1": {"type": "buffer", "source": "buffer_b", "filter": "linear"},
+                    }
+                }
+            },
+        )
+        channels = load_project(root).passes["image"].channels
+        assert (channels[0].filter, channels[1].filter) == ("nearest", "linear")
+
+    def test_vflip_on_a_buffer_is_rejected(self, make_project):
+        """It was silently ignored: buffers are never flipped by this renderer."""
+        root = make_project(
+            {"buffer_a.glsl": self.CHECKER, "image.glsl": PASSTHROUGH},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a", "vflip": True}
+                    }
+                }
+            },
+        )
+        with pytest.raises(ProjectError, match='"vflip" is not supported for buffer'):
+            load_project(root)
+
+
+@pytest.mark.gpu
+class TestSharedBufferSamplerApplies:
+    """With settings validated as consistent, they must actually take effect on
+    every reference."""
+
+    CHECKER = TestBufferSamplerSettingsAreSharedPerBuffer.CHECKER
+    TWO_CHANNELS = TestBufferSamplerSettingsAreSharedPerBuffer.TWO_CHANNELS
+
+    def _pixel(self, make_project, gl_context, filter_name):
+        from shadertoy_local.renderer import Renderer, RenderSettings
+
+        root = make_project(
+            {"buffer_a.glsl": self.CHECKER, "image.glsl": self.TWO_CHANNELS},
+            config={
+                "buffer_a": {"scale": 0.25},
+                "image": {
+                    "channels": {
+                        "0": {"type": "buffer", "source": "buffer_a",
+                              "filter": filter_name},
+                        "1": {"type": "buffer", "source": "buffer_a",
+                              "filter": filter_name},
+                    }
+                },
+            },
+        )
+        renderer = Renderer(
+            load_project(root), gl_context.ctx, RenderSettings(width=64, height=64)
+        )
+        renderer.compile()
+        try:
+            return renderer.render_frame().images["image"][1, 1].copy()
+        finally:
+            renderer.release()
+
+    def test_nearest_applies_to_both_references(self, make_project, gl_context):
+        pixel = self._pixel(make_project, gl_context, "nearest")
+        assert pixel[0] == pytest.approx(0.0)
+        assert pixel[1] == pytest.approx(0.0)
+
+    def test_linear_applies_to_both_references(self, make_project, gl_context):
+        pixel = self._pixel(make_project, gl_context, "linear")
+        assert pixel[0] == pytest.approx(0.5)
+        assert pixel[1] == pytest.approx(0.5)
 
 
 # --------------------------------------------------------------------------

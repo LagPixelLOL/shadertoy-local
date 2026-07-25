@@ -534,12 +534,15 @@ def _parse_channel(
         # state), but diverging here would make a shader render differently than
         # it does on the site, which is a worse failure for a compatibility tool
         # than a foot-gun faithfully reproduced.
+        if "vflip" in spec:
+            raise ProjectError(
+                f'{where}: "vflip" is not supported for buffer channels'
+            )
         if "filter" not in spec:
             binding.filter = "linear"
         if "wrap" not in spec:
             binding.wrap = "clamp"
-        if "vflip" not in spec:
-            binding.vflip = False
+        binding.vflip = False
     elif binding.is_builtin:
         if "vflip" not in spec:
             binding.vflip = False
@@ -554,6 +557,43 @@ def _parse_channel(
             )
         binding.path = path
     return binding
+
+
+def _validate_buffer_samplers(passes: dict[str, "PassSpec"]) -> None:
+    """Require every reference to a buffer to request the same sampler settings.
+
+    On shadertoy.com a buffer's filter and wrap belong to the *buffer*, not to the
+    channel that reads it: changing them on one reference changes every reference,
+    because GL stores sampler state on the texture object. A config asking for two
+    different settings for one buffer is therefore inexpressible on the real site,
+    so it is rejected rather than resolved arbitrarily in favour of whichever
+    binding happens to be applied last.
+    """
+    seen: dict[str, tuple[str, tuple[str, str]]] = {}
+    for name in PASS_NAMES:
+        spec = passes.get(name)
+        if spec is None:
+            continue
+        for index, binding in sorted(spec.channels.items()):
+            if not binding.is_buffer:
+                continue
+            settings = (binding.filter, binding.wrap)
+            where = f"[{name}] channel{index}"
+            if binding.source not in seen:
+                seen[binding.source] = (where, settings)
+                continue
+            first_where, first_settings = seen[binding.source]
+            if settings != first_settings:
+                raise ProjectError(
+                    f"{where} reads {binding.source} with "
+                    f"filter={settings[0]}, wrap={settings[1]}, but {first_where} "
+                    f"reads it with filter={first_settings[0]}, "
+                    f"wrap={first_settings[1]}.\n"
+                    f"A buffer's sampler settings belong to the buffer, not to the "
+                    f"channel: on shadertoy.com changing them on one reference "
+                    f"changes every reference. Use the same settings everywhere "
+                    f"{binding.source} is read."
+                )
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -672,6 +712,8 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
             if raw is None:
                 continue
             spec.channels[index] = _parse_channel(raw, root, name, index, declared)
+
+    _validate_buffer_samplers(passes)
 
     return Project(
         root=root,

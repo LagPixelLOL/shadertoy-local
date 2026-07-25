@@ -81,7 +81,7 @@ Shadertoy lacks.
 
 | Channel type | `source` | Notes |
 |---|---|---|
-| `buffer` | `buffer_a`..`buffer_d` | Defaults to `linear`/`clamp`, no vflip — matching shadertoy.com |
+| `buffer` | `buffer_a`..`buffer_d` | Defaults to `linear`/`clamp` — matching shadertoy.com. Settings are per *buffer*, see below |
 | `texture` | path relative to project root | Any format Pillow reads |
 | `builtin` | see below | Procedural, needs no asset files |
 | `keyboard` | *(none needed)* | 256x3 key state texture |
@@ -113,6 +113,25 @@ builtin if one is wrong.
 
 `"0": "buffer_a"` is shorthand for the full object; `type` is inferred from
 `source` and validated when given.
+
+### Buffer sampler settings belong to the buffer
+
+On shadertoy.com a buffer's `filter` and `wrap` are properties of the **buffer**,
+not of the channel reading it: change them on one reference and every reference
+changes, because GL stores sampler state on the texture object. Asking for two
+different settings for one buffer is therefore inexpressible on the real site, and
+is rejected here rather than resolved in favour of whichever binding is applied
+last:
+
+```
+error: [image] channel1 reads buffer_a with filter=nearest, wrap=clamp, but
+[image] channel0 reads it with filter=mipmap, wrap=repeat.
+A buffer's sampler settings belong to the buffer, not to the channel: on
+shadertoy.com changing them on one reference changes every reference.
+```
+
+The constraint is per buffer, so different buffers may use different settings.
+`vflip` is rejected on buffer channels, since buffers are never flipped.
 
 ### Validation is strict
 
