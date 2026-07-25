@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .compose import DEFAULT_GLSL_VERSION
-from .project import BUFFER_NAMES, LOCAL_ONLY_BUILTINS, ChannelBinding, Project
+from .project import BUFFER_NAMES, ChannelBinding, Project
 
 #: Local builtin -> where to find its counterpart in shadertoy.com's input picker.
 #: Only the ones that genuinely have a counterpart appear here.
@@ -207,28 +207,6 @@ def build_report(project: Project) -> PortingReport:
                 f"({', '.join(users)}); its filter and wrap are a property of the "
                 f"buffer on the site, so set them once"
             )
-
-    if project.common_path is not None:
-        report.notes.append(
-            "The Common tab is validated on its own by the site, so references to "
-            "iTime and similar will show as undeclared there even though the "
-            "shader runs; `shadertoy check` reports which lines"
-        )
-
-    if any(
-        binding.kind == "builtin" and binding.source in LOCAL_ONLY_BUILTINS
-        for spec in project.ordered_passes
-        for binding in spec.channels.values()
-    ):
-        report.notes.append(
-            "Local-only builtin textures are debugging aids; nothing in the site's "
-            "input picker reproduces them"
-        )
-
-    report.notes.append(
-        "Resolution and frame rate come from the site's viewport and cannot be "
-        "set, so width/height/fps in defaults are local-only"
-    )
 
     return report
 

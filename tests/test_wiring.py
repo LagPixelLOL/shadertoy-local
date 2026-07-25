@@ -261,17 +261,24 @@ class TestNotes:
         )
         assert not any("property of the buffer" in n for n in report.notes)
 
-    def test_common_tab_note_only_when_common_exists(self, make_project):
-        with_common = report_for(
+    def test_no_generic_boilerplate_notes(self, make_project):
+        """Notes must be project-specific and actionable. The Common-tab caveat is
+        already reported per-line by `check`, and a viewport/resolution note
+        applies to every project alike, so neither belongs here."""
+        report = report_for(
             make_project, {"image.glsl": IMAGE, "common.glsl": "// x\n"}
         )
-        without = report_for(make_project, {"image.glsl": IMAGE})
-        assert any("Common tab" in n for n in with_common.notes)
-        assert not any("Common tab" in n for n in without.notes)
+        assert report.notes == []
 
-    def test_viewport_note_is_always_present(self, make_project):
-        report = report_for(make_project, {"image.glsl": IMAGE})
-        assert any("viewport" in n for n in report.notes)
+    def test_local_only_builtin_has_no_duplicate_note(self, make_project):
+        """It is already a blocker; saying it twice is noise."""
+        report = report_for(
+            make_project,
+            {"image.glsl": SAMPLE},
+            config={"image": {"channels": {"0": "uv"}}},
+        )
+        assert report.blockers
+        assert report.notes == []
 
 
 class TestFormatting:
@@ -299,6 +306,10 @@ class TestFormatting:
         text = "\n".join(format_report(report))
         assert "Cannot be reproduced as-is" in text
 
+    def test_worth_knowing_section_is_omitted_when_empty(self, make_project):
+        lines = format_report(report_for(make_project, {"image.glsl": IMAGE}))
+        assert not any("Worth knowing" in line for line in lines)
+
     def test_report_is_serialisable(self, make_project):
         report = report_for(
             make_project,
@@ -308,3 +319,27 @@ class TestFormatting:
         payload = json.loads(json.dumps(report.to_dict()))
         assert payload["portable"] is True
         assert payload["channels"][0]["site_input"] == "Misc > Buffer A"
+
+
+class TestProjectListingMatchesTabs:
+    """The file summary printed above the porting guide must not contradict the
+    tab list inside it. Common is not a pass, so it is absent from
+    ordered_passes and was previously missing from the summary alone.
+    """
+
+    def test_common_appears_in_the_tab_list(self, make_project):
+        report = report_for(
+            make_project, {"image.glsl": IMAGE, "common.glsl": "// x\n"}
+        )
+        assert ("Common", "common.glsl") in report.tabs
+
+    @pytest.mark.gpu
+    def test_cli_lists_common_in_both_places(self, capsys, make_project):
+        from shadertoy_local.cli import main
+
+        root = make_project({"image.glsl": IMAGE, "common.glsl": "// x\n"})
+        main(["info", "-C", str(root), "--no-runtime-check"])
+        text = capsys.readouterr().err
+        summary, _, porting = text.partition("-- porting to shadertoy.com")
+        assert "common.glsl" in summary, "file summary omitted Common"
+        assert "common.glsl" in porting, "tab list omitted Common"

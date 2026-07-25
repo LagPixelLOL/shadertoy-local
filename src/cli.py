@@ -470,6 +470,10 @@ def cmd_info(args: argparse.Namespace) -> int:
             title += f"  ({name})"
         report.say(title)
         report.say()
+        # Common is not a pass, so it is absent from ordered_passes -- list it
+        # explicitly or the file summary contradicts the tab list below.
+        if project.common_path is not None:
+            report.say(f"  {'Common':<9} {project.common_path.name}")
         for spec in project.ordered_passes:
             channels = ", ".join(
                 f"iChannel{i}={b.source}" for i, b in sorted(spec.channels.items())

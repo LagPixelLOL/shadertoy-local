@@ -511,6 +511,9 @@ which parts of the project **cannot** be reproduced there.
       buffer on the site, so set them once
 ```
 
+Notes are project-specific and actionable only; there is no generic advice
+section.
+
 Blockers detected: local texture files (the site has no custom texture upload),
 local-only builtins, reduced-resolution buffers, `#include`, and GLSL newer than
 ES 3.0. The whole report is in `--json` under `porting`, with a `portable` boolean.
