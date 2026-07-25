@@ -321,25 +321,81 @@ class TestFormatting:
         assert payload["channels"][0]["site_input"] == "Misc > Buffer A"
 
 
-class TestProjectListingMatchesTabs:
-    """The file summary printed above the porting guide must not contradict the
-    tab list inside it. Common is not a pass, so it is absent from
-    ordered_passes and was previously missing from the summary alone.
+class TestSingleSourceOfTruth:
+    """The file summary and the tab list are both derived from
+    ``Project.ordered_files``, so they cannot disagree about which files exist.
+    They previously did: Common is not a pass, so it never appeared in
+    ``ordered_passes``, which the summary iterated while the tab list built its
+    own sequence.
     """
 
-    def test_common_appears_in_the_tab_list(self, make_project):
-        report = report_for(
-            make_project, {"image.glsl": IMAGE, "common.glsl": "// x\n"}
+    def test_tabs_are_exactly_the_project_files(self, make_project):
+        project = load_project(
+            make_project(
+                {
+                    "common.glsl": "// x\n",
+                    "buffer_a.glsl": IMAGE,
+                    "buffer_c.glsl": IMAGE,
+                    "image.glsl": IMAGE,
+                }
+            )
         )
-        assert ("Common", "common.glsl") in report.tabs
+        report = build_report(project)
+        assert report.tabs == [
+            (entry.label, entry.path.name) for entry in project.ordered_files
+        ]
+
+    def test_ordered_files_places_common_first(self, make_project):
+        project = load_project(
+            make_project(
+                {"common.glsl": "// x\n", "buffer_b.glsl": IMAGE, "image.glsl": IMAGE}
+            )
+        )
+        assert [e.label for e in project.ordered_files] == [
+            "Common",
+            "Buffer B",
+            "Image",
+        ]
+
+    def test_common_is_not_a_pass(self, make_project):
+        project = load_project(
+            make_project({"common.glsl": "// x\n", "image.glsl": IMAGE})
+        )
+        by_label = {e.label: e for e in project.ordered_files}
+        assert by_label["Common"].is_pass is False
+        assert by_label["Common"].spec is None
+        assert by_label["Image"].is_pass is True
+
+    def test_ordered_files_without_common(self, make_project):
+        project = load_project(make_project({"image.glsl": IMAGE}))
+        assert [e.label for e in project.ordered_files] == ["Image"]
+
+    def test_source_files_is_derived_from_ordered_files(self, make_project):
+        project = load_project(
+            make_project({"common.glsl": "// x\n", "image.glsl": IMAGE})
+        )
+        assert project.source_files() == [e.path for e in project.ordered_files]
+
+    def test_labels_match_the_pass_labels(self, make_project):
+        """wiring no longer keeps its own tab-name table; a second mapping would
+        be free to drift from PassSpec.label."""
+        project = load_project(
+            make_project({"buffer_d.glsl": IMAGE, "image.glsl": IMAGE})
+        )
+        labels = {e.label for e in project.ordered_files if e.spec is not None}
+        assert labels == {spec.label for spec in project.ordered_passes}
 
     @pytest.mark.gpu
-    def test_cli_lists_common_in_both_places(self, capsys, make_project):
+    def test_cli_summary_and_tab_list_agree(self, capsys, make_project):
+        """The end-to-end property that was actually broken."""
         from shadertoy_local.cli import main
 
-        root = make_project({"image.glsl": IMAGE, "common.glsl": "// x\n"})
+        root = make_project(
+            {"common.glsl": "// x\n", "buffer_a.glsl": IMAGE, "image.glsl": IMAGE}
+        )
         main(["info", "-C", str(root), "--no-runtime-check"])
         text = capsys.readouterr().err
         summary, _, porting = text.partition("-- porting to shadertoy.com")
-        assert "common.glsl" in summary, "file summary omitted Common"
-        assert "common.glsl" in porting, "tab list omitted Common"
+        for filename in ("common.glsl", "buffer_a.glsl", "image.glsl"):
+            assert filename in summary, f"file summary omitted {filename}"
+            assert filename in porting, f"tab list omitted {filename}"

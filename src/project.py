@@ -318,6 +318,24 @@ class PassSpec:
         return "Buffer " + self.name.rsplit("_", 1)[1].upper()
 
 
+#: How the Common tab is labelled. Passes carry their own label on PassSpec.
+COMMON_LABEL = "Common"
+
+
+@dataclass(frozen=True)
+class ProjectFile:
+    """One source file, labelled the way shadertoy.com labels its tabs."""
+
+    label: str
+    path: Path
+    #: The pass this file implements, or None for Common, which is not a pass.
+    spec: PassSpec | None = None
+
+    @property
+    def is_pass(self) -> bool:
+        return self.spec is not None
+
+
 @dataclass
 class Project:
     """A fully resolved, ready-to-render project."""
@@ -338,11 +356,28 @@ class Project:
     def buffer_passes(self) -> list[PassSpec]:
         return [self.passes[n] for n in BUFFER_NAMES if n in self.passes]
 
-    def source_files(self) -> list[Path]:
-        files = [p.path for p in self.ordered_passes]
-        if self.common_path:
-            files.append(self.common_path)
+    @property
+    def ordered_files(self) -> list[ProjectFile]:
+        """Every source file, in the order they must exist.
+
+        Common first, since its helpers are used by the passes, then Buffer A-D,
+        then Image. This is the single answer to "what files does this project
+        have": the CLI summary and the shadertoy.com porting guide both consume
+        it, so they cannot disagree about whether Common exists -- which they
+        previously did, because Common is not a pass and so never appeared in
+        ``ordered_passes``.
+        """
+        files: list[ProjectFile] = []
+        if self.common_path is not None:
+            files.append(ProjectFile(label=COMMON_LABEL, path=self.common_path))
+        for spec in self.ordered_passes:
+            files.append(
+                ProjectFile(label=spec.label, path=spec.path, spec=spec)
+            )
         return files
+
+    def source_files(self) -> list[Path]:
+        return [entry.path for entry in self.ordered_files]
 
     def default(self, key: str, fallback: Any) -> Any:
         """Read a value from the config's ``[defaults]`` table."""

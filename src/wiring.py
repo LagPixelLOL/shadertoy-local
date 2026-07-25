@@ -37,16 +37,6 @@ _BUILTIN_TO_SITE: dict[str, str] = {
 #: defined by recurrence rather than authored, so it can be reproduced bit for bit.
 _EXACT_BUILTINS = frozenset({"bayer"})
 
-#: How a pass name appears as a tab on the site.
-_TAB_NAMES = {
-    "image": "Image",
-    "buffer_a": "Buffer A",
-    "buffer_b": "Buffer B",
-    "buffer_c": "Buffer C",
-    "buffer_d": "Buffer D",
-}
-
-
 @dataclass
 class ChannelWiring:
     """One ``iChannelN`` slot and what to put in it."""
@@ -135,11 +125,9 @@ def build_report(project: Project) -> PortingReport:
     """Work out how to reproduce *project* on shadertoy.com."""
     report = PortingReport()
 
-    # Tabs, in an order where a buffer exists before anything references it.
-    if project.common_path is not None:
-        report.tabs.append(("Common", project.common_path.name))
-    for spec in project.ordered_passes:
-        report.tabs.append((_TAB_NAMES[spec.name], spec.path.name))
+    # Tabs come straight from the project's own file ordering, so this cannot
+    # drift from what the CLI prints above it.
+    report.tabs = [(entry.label, entry.path.name) for entry in project.ordered_files]
 
     buffer_users: dict[str, list[str]] = {}
 
@@ -148,7 +136,7 @@ def build_report(project: Project) -> PortingReport:
             site_input, note = _describe_binding(binding)
             report.channels.append(
                 ChannelWiring(
-                    pass_name=_TAB_NAMES[spec.name],
+                    pass_name=spec.label,
                     index=index,
                     site_input=site_input,
                     source=binding.source,
@@ -160,10 +148,10 @@ def build_report(project: Project) -> PortingReport:
                 )
             )
             if site_input is None and note:
-                report.blockers.append(f"{_TAB_NAMES[spec.name]} iChannel{index}: {note}")
+                report.blockers.append(f"{spec.label} iChannel{index}: {note}")
             if binding.is_buffer:
                 buffer_users.setdefault(binding.source, []).append(
-                    f"{_TAB_NAMES[spec.name]} iChannel{index}"
+                    f"{spec.label} iChannel{index}"
                 )
 
     # -- things the site cannot express ---------------------------------
@@ -171,7 +159,7 @@ def build_report(project: Project) -> PortingReport:
     for spec in project.ordered_passes:
         if spec.name in BUFFER_NAMES and spec.scale != 1.0:
             report.blockers.append(
-                f"{_TAB_NAMES[spec.name]} uses scale={spec.scale}; buffers on "
+                f"{spec.label} uses scale={spec.scale}; buffers on "
                 f"shadertoy.com are always full resolution"
             )
 
