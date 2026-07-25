@@ -254,11 +254,27 @@ const float GLOBE_L   = 2.3;                  // surface radiance
 
 // Hue rotation at constant luminance: only the chromaticity moves, so nothing
 // downstream has to chase the colour wheel around -- the exposure is fixed, and
-// the temporal filter sees a scene whose brightness never changes, which is why
-// it can afford a long history (see Buffer B).
+// the temporal filter sees a scene whose brightness never changes.
+//
+// CHROMA_FLOOR is why no channel is allowed near zero, and it is not a taste
+// decision. The globe is far brighter than the tonemap's shoulder, so its two
+// strong channels are saturated at the centre AND at the rim, and every bit of
+// visible structure -- the whole reason for marching the medium -- survives only in
+// the weakest channel. The pow() below deepens the hue, and on its own it drives
+// that channel to 1e-4 three times per rotation, at which point the filament
+// simply vanishes: measured over a full cycle, centre-to-rim contrast collapsed to
+// 4/255 at those hues, against 30 or more elsewhere. The core appeared to switch
+// itself off every few seconds.
+//
+// Flooring the channels fixes that without giving up the colour, which pulling the
+// hue towards white does not: at equal frame brightness, a floor of 0.03 holds the
+// worst case at 29/255 of contrast while keeping 115 of 161 units of the globe's
+// original chroma, where desaturating enough to match the contrast cost more than
+// half of it and washed the room's colour out with it.
+const float CHROMA_FLOOR = 0.03;
 vec3 globeRadiance(float time) {
     vec3 c = 0.5 + 0.5 * cos(TAU * time / GLOBE_HUE + vec3(0.0, 2.094, 4.189));
-    c = pow(c, vec3(1.6));                    // deepen it, so the wash is a hue
+    c = max(pow(c, vec3(1.6)), vec3(CHROMA_FLOOR));
     c /= max(lum(c), 0.12);
     return c * GLOBE_L;
 }

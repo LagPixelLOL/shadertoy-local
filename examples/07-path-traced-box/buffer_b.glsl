@@ -90,19 +90,32 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // 15 seconds, so a history worth ~14 frames costs nothing in lag and buys
     // the quietest image; the only thing the filter has to keep up with is the
     // camera, which the motion term already handles.
-    // GAMMA bounds the history to the current frame's neighbourhood, and it only
-    // needs to be tight while the camera moves -- that is what stops stale history
-    // ghosting across a disocclusion. Keeping it tight when nothing is moving is
-    // actively harmful: clamping into m1 +- GAMMA*sig every frame, with sig
-    // estimated from nine samples of a right-skewed distribution, ratchets a
-    // converged pixel downwards. Measured at 1440p, 2.4 cost 10.25/255 of
-    // brightness on the pedestal against a 48 spp reference, for 0.02/255 less
-    // noise; and during a fast drag, 2.4 and 10.0 track that reference identically
-    // (2.29 either way), because the motion term below has already taken over.
+    // GAMMA bounds the history to the current frame's neighbourhood: it is what
+    // stops stale history ghosting when the camera moves. It is loose only while
+    // nothing moves at all, and clamps down to 1 as soon as anything does.
+    //
+    // The ramp is deliberately abrupt -- fully tight by half a pixel of
+    // reprojected motion -- and that number was expensive to learn. A lazier ramp
+    // (tight only past 4 px) leaves GAMMA near 7 during a slow drag, which is
+    // exactly where stale history survives: measured against a reference with the
+    // history disabled, a slow drag went from 38.9 to 45.3 at the 99th percentile,
+    // and that is visible as smearing. A fast drag hides the problem, because both
+    // ends of the ramp are tight by then, so it has to be tested slow.
+    //
+    // Judge this only against a reference that has no history AND no clamps of its
+    // own. A high-spp render through this same pipeline is not ground truth: at
+    // high sample counts sig shrinks, so its own clamp bites harder than the one
+    // being measured, and comparing against it will appear to justify loosening
+    // GAMMA far past the point where it starts ghosting.
+    //
+    // Both thresholds are in 360p-equivalent pixels: the same camera motion
+    // displaces four times as many pixels at 1440p, and neither the ghosting nor
+    // the convergence behaviour should change with the output size.
     float motion = valid ? length(fcPrev - fragCoord) : 1e3;
-    float mf = clamp((motion - 0.4) / 6.0, 0.0, 1.0);
-    float GAMMA = mix(10.0, 1.0, mf);
-    float alpha = mix(0.07, 0.38, mf);
+    float mpx = motion * (360.0 / iResolution.y);
+    float mfA = clamp((mpx - 0.4) / 6.0, 0.0, 1.0);   // alpha: how fast to refresh
+    float GAMMA = mix(10.0, 1.0, clamp(mpx / 0.5, 0.0, 1.0));
+    float alpha = mix(0.07, 0.38, mfA);
     vec3 lo = m1 - GAMMA * sig, hi = m1 + GAMMA * sig;
 
     vec3 col; float mom2;
