@@ -1,0 +1,898 @@
+"""Edge cases and deliberately broken inputs.
+
+Written to probe for real failures rather than to raise a count: every case here
+is something a user or agent could plausibly do that the happy path never
+exercises -- empty files, corrupt assets, degenerate sizes, nonsensical event
+orders, and hostile paths.
+"""
+
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pytest
+
+from shadertoy_local.compose import compose_pass
+from shadertoy_local.inputs import InputError, InputTimeline
+from shadertoy_local.project import ProjectError, find_project_root, load_project
+
+IMAGE = "void mainImage(out vec4 c, in vec2 f){ c = vec4(1.0); }\n"
+PASSTHROUGH = (
+    "void mainImage(out vec4 c, in vec2 f){\n"
+    "    c = texture(iChannel0, f/iResolution.xy);\n"
+    "}\n"
+)
+
+
+# --------------------------------------------------------------------------
+# Source files
+# --------------------------------------------------------------------------
+
+
+class TestDegenerateSourceFiles:
+    def test_empty_image_file(self, make_project):
+        root = make_project({"image.glsl": ""})
+        project = load_project(root)
+        with pytest.raises(ProjectError, match="no mainImage"):
+            compose_pass(project, project.passes["image"])
+
+    def test_whitespace_only_image_file(self, make_project):
+        root = make_project({"image.glsl": "\n\n   \n\t\n"})
+        project = load_project(root)
+        with pytest.raises(ProjectError, match="no mainImage"):
+            compose_pass(project, project.passes["image"])
+
+    def test_comment_only_image_file(self, make_project):
+        root = make_project({"image.glsl": "// nothing here\n/* nor here */\n"})
+        project = load_project(root)
+        with pytest.raises(ProjectError, match="no mainImage"):
+            compose_pass(project, project.passes["image"])
+
+    def test_main_image_inside_a_comment_does_not_count(self, make_project):
+        """The detector must not be fooled by a commented-out definition."""
+        root = make_project(
+            {"image.glsl": "// void mainImage(out vec4 c, in vec2 f) {}\n"}
+        )
+        project = load_project(root)
+        with pytest.raises(ProjectError, match="no mainImage"):
+            compose_pass(project, project.passes["image"])
+
+    def test_non_utf8_source_is_reported_clearly(self, tmp_path):
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "image.glsl").write_bytes(b"void mainImage(){} // \xff\xfe invalid")
+        with pytest.raises(ProjectError, match="not valid UTF-8"):
+            load_project(root)
+
+    def test_source_with_bom_still_compiles_to_a_pass(self, make_project):
+        """A BOM is common from Windows editors; it must not break detection."""
+        root = make_project({"image.glsl": "\ufeff" + IMAGE})
+        project = load_project(root)
+        composed = compose_pass(project, project.passes["image"])
+        assert "mainImage" in composed.source
+
+    def test_crlf_line_endings_keep_the_line_map_correct(self, make_project):
+        source = "// one\r\n// two\r\nvoid mainImage(out vec4 c, in vec2 f){ c=vec4(1.0); }\r\n"
+        root = make_project({"image.glsl": source})
+        project = load_project(root)
+        composed = compose_pass(project, project.passes["image"])
+        origins = [o for o in composed.origins if o and o.file == "image.glsl"]
+        assert [o.line for o in origins[:3]] == [1, 2, 3]
+
+
+class TestPassDiscoveryEdges:
+    def test_buffer_d_without_a_b_c(self, make_project):
+        """Buffers need not be contiguous."""
+        root = make_project({"image.glsl": IMAGE, "buffer_d.glsl": IMAGE})
+        project = load_project(root)
+        assert [p.name for p in project.ordered_passes] == ["buffer_d", "image"]
+
+    def test_frag_extension_is_accepted(self, make_project):
+        root = make_project({"image.frag": IMAGE})
+        assert "image" in load_project(root).passes
+
+    def test_glsl_wins_over_frag(self, make_project):
+        root = make_project({"image.glsl": IMAGE, "image.frag": "broken"})
+        assert load_project(root).passes["image"].path.name == "image.glsl"
+
+    def test_configured_pass_without_a_file(self, make_project):
+        root = make_project({"image.glsl": IMAGE}, config={"buffer_a": {"scale": 0.5}})
+        with pytest.raises(ProjectError, match="no such pass file"):
+            load_project(root)
+
+    def test_find_root_accepts_a_file_path(self, make_project):
+        root = make_project({"image.glsl": IMAGE})
+        assert find_project_root(root / "image.glsl") == root
+
+    def test_config_without_image_pass(self, tmp_path):
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / "shadertoy.json").write_text("{}")
+        with pytest.raises(ProjectError, match="no image pass"):
+            load_project(root, search_parents=False)
+
+    def test_unicode_project_path(self, tmp_path):
+        root = tmp_path / "shädér tøy ✨"
+        root.mkdir()
+        (root / "image.glsl").write_text(IMAGE, encoding="utf-8")
+        assert load_project(root).passes["image"].source == IMAGE
+
+
+class TestIncludeEdges:
+    def test_include_from_a_subdirectory(self, make_project):
+        root = make_project(
+            {
+                "image.glsl": '#include "lib/a.glsl"\n' + IMAGE,
+                "lib/a.glsl": '#include "lib/b.glsl"\n',
+                "lib/b.glsl": "float helper(){ return 1.0; }\n",
+            }
+        )
+        project = load_project(root)
+        composed = compose_pass(project, project.passes["image"])
+        assert "helper" in composed.source
+
+    def test_include_depth_limit(self, make_project):
+        """A long chain must hit the limit rather than recursing forever."""
+        files = {"image.glsl": '#include "d0.glsl"\n' + IMAGE}
+        for i in range(30):
+            files[f"d{i}.glsl"] = f'#include "d{i + 1}.glsl"\n'
+        files["d30.glsl"] = "float x = 1.0;\n"
+        project = load_project(make_project(files))
+        with pytest.raises(ProjectError, match="nested deeper than"):
+            compose_pass(project, project.passes["image"])
+
+    def test_self_include_is_circular(self, make_project):
+        root = make_project({"image.glsl": '#include "image.glsl"\n' + IMAGE})
+        project = load_project(root)
+        with pytest.raises(ProjectError, match="circular #include"):
+            compose_pass(project, project.passes["image"])
+
+    def test_include_of_non_utf8_file(self, make_project, tmp_path):
+        root = make_project({"image.glsl": '#include "bad.glsl"\n' + IMAGE})
+        (root / "bad.glsl").write_bytes(b"\xff\xfe\x00")
+        project = load_project(root)
+        with pytest.raises(ProjectError, match="not valid UTF-8"):
+            compose_pass(project, project.passes["image"])
+
+    def test_include_the_same_file_twice_is_not_circular(self, make_project):
+        """Diamond includes are legal; only cycles are not."""
+        root = make_project(
+            {
+                "image.glsl": '#include "a.glsl"\n#include "b.glsl"\n' + IMAGE,
+                "a.glsl": '#include "shared.glsl"\n',
+                "b.glsl": '#include "shared.glsl"\n',
+                "shared.glsl": "// shared\n",
+            }
+        )
+        project = load_project(root)
+        composed = compose_pass(project, project.passes["image"])
+        assert composed.source.count("// shared") == 2
+
+    def test_indented_include_is_honoured(self, make_project):
+        root = make_project(
+            {"image.glsl": '  #  include "a.glsl"\n' + IMAGE, "a.glsl": "// inc\n"}
+        )
+        project = load_project(root)
+        composed = compose_pass(project, project.passes["image"])
+        assert "// inc" in composed.source
+
+
+# --------------------------------------------------------------------------
+# Input timeline
+# --------------------------------------------------------------------------
+
+
+class TestTimelineEdges:
+    def test_key_up_without_a_prior_down(self):
+        """Nonsense but harmless: releasing an unheld key is a no-op."""
+        line = InputTimeline.from_spec(
+            [{"frame": 0, "op": "key_up", "keys": ["space"]}]
+        )
+        assert line.state_at(0).held == frozenset()
+
+    def test_mouse_up_without_a_prior_down(self):
+        line = InputTimeline.from_spec([{"frame": 0, "op": "mouse_up"}])
+        state = line.state_at(0)
+        assert state.button_down is False
+        assert state.press_frame is None
+
+    def test_double_press_without_release(self):
+        line = InputTimeline.from_spec(
+            [
+                {"frame": 0, "op": "mouse_down", "pos": [10, 10]},
+                {"frame": 5, "op": "mouse_down", "pos": [50, 50]},
+            ]
+        )
+        state = line.state_at(5)
+        assert state.press_frame == 5
+        assert (state.click_x, state.click_y) == (50.0, 50.0)
+
+    def test_duplicate_identical_events_are_idempotent(self):
+        ops = [{"frame": 0, "op": "key_down", "keys": ["a"]}] * 3
+        assert InputTimeline.from_spec(ops).state_at(0).held == frozenset({65})
+
+    def test_key_down_and_key_up_same_frame_file_order_wins(self):
+        down_then_up = InputTimeline.from_spec(
+            [
+                {"frame": 0, "op": "key_down", "keys": ["a"]},
+                {"frame": 0, "op": "key_up", "keys": ["a"]},
+            ]
+        )
+        up_then_down = InputTimeline.from_spec(
+            [
+                {"frame": 0, "op": "key_up", "keys": ["a"]},
+                {"frame": 0, "op": "key_down", "keys": ["a"]},
+            ]
+        )
+        assert down_then_up.state_at(0).held == frozenset()
+        assert up_then_down.state_at(0).held == frozenset({65})
+
+    def test_pressed_row_still_fires_when_released_the_same_frame(self):
+        """The press happened, so row 1 reports it even though row 0 does not."""
+        line = InputTimeline.from_spec(
+            [
+                {"frame": 0, "op": "key_down", "keys": ["a"]},
+                {"frame": 0, "op": "key_up", "keys": ["a"]},
+            ]
+        )
+        state = line.state_at(0)
+        assert 65 in state.pressed
+        assert 65 not in state.held
+
+    def test_repeated_toggles_flip_each_time(self):
+        ops = [{"frame": i, "op": "key_toggle", "keys": ["g"]} for i in range(5)]
+        line = InputTimeline.from_spec(ops)
+        assert [71 in line.state_at(f).toggled for f in range(5)] == [
+            True, False, True, False, True
+        ]
+
+    def test_untoggle_an_untoggled_key_is_a_no_op(self):
+        line = InputTimeline.from_spec(
+            [{"frame": 0, "op": "key_untoggle", "keys": ["g"]}]
+        )
+        assert line.state_at(0).toggled == frozenset()
+
+    def test_state_before_any_event(self):
+        line = InputTimeline.from_spec([{"frame": 100, "op": "mouse_down", "pos": [1, 1]}])
+        state = line.state_at(0)
+        assert not state.button_down and (state.x, state.y) == (0.0, 0.0)
+
+    def test_state_far_after_the_last_event(self):
+        line = InputTimeline.from_spec([{"frame": 1, "op": "key_down", "keys": ["a"]}])
+        assert 65 in line.state_at(10_000).held
+
+    def test_very_large_frame_index(self):
+        line = InputTimeline.from_spec(
+            [{"frame": 10**9, "op": "key_down", "keys": ["a"]}]
+        )
+        assert line.last_frame == 10**9
+        assert line.state_at(10**9 - 1).held == frozenset()
+
+    def test_fractional_fps_time_conversion(self):
+        line = InputTimeline.from_spec(
+            [{"time": 1.0, "op": "mouse_up"}], fps=29.97
+        )
+        assert line.events[0].frame == 30
+
+    def test_many_events_on_one_frame(self):
+        ops = [
+            {"frame": 0, "op": "key_down", "keys": [code]} for code in range(65, 91)
+        ]
+        state = InputTimeline.from_spec(ops).state_at(0)
+        assert len(state.held) == 26
+
+    def test_empty_list_is_valid(self):
+        line = InputTimeline.from_spec([])
+        assert not line.active
+        assert line.state_at(0).keyboard_bytes() == bytes(256 * 3)
+
+    def test_duplicate_keys_within_one_op_are_deduplicated(self):
+        line = InputTimeline.from_spec(
+            [{"frame": 0, "op": "key_down", "keys": ["a", "a", "A"]}]
+        )
+        assert line.events[0].keys == (65,)
+
+    def test_normalized_positions_outside_zero_one(self):
+        """Off-screen coordinates are legal; shaders may rely on them."""
+        line = InputTimeline.from_spec(
+            [{"frame": 0, "op": "mouse_move", "pos": [1.5, -0.25], "normalized": True}]
+        )
+        x, y, _, _ = line.state_at(0).mouse_vec4(640, 360, 0)
+        assert (x, y) == (960.0, -90.0)
+
+    def test_pos_as_string_is_accepted(self):
+        line = InputTimeline.from_spec(
+            [{"frame": 0, "op": "mouse_move", "pos": "10, 20"}]
+        )
+        assert (line.state_at(0).x, line.state_at(0).y) == (10.0, 20.0)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            [{"frame": 0, "op": "mouse_move", "pos": ["a", "b"]}],
+            [{"frame": 0, "op": "mouse_move", "pos": {}}],
+            [{"frame": 0, "op": "key_down", "keys": [None]}],
+            [{"frame": 0, "op": "key_down", "keys": [1.5]}],
+            [{"frame": 0, "op": None}],
+            [None],
+            [[]],
+        ],
+    )
+    def test_malformed_operations(self, bad):
+        with pytest.raises(InputError):
+            InputTimeline.from_spec(bad)
+
+    def test_json_object_at_top_level_is_one_event(self):
+        line = InputTimeline.from_json('{"frame": 3, "op": "key_down", "keys": ["a"]}')
+        assert 65 in line.state_at(3).held
+
+    def test_json_number_at_top_level_is_rejected(self):
+        with pytest.raises(InputError, match="must be an array"):
+            InputTimeline.from_json("42")
+
+
+# --------------------------------------------------------------------------
+# Assets and analysis
+# --------------------------------------------------------------------------
+
+
+class TestTextureAssetEdges:
+    def _project_with_texture(self, make_project, name="tex.png"):
+        return make_project(
+            {"image.glsl": PASSTHROUGH},
+            config={"image": {"channels": {"0": {"type": "texture", "source": name}}}},
+        )
+
+    def test_corrupt_image_file(self, make_project):
+        from shadertoy_local.channels import load_image_array
+
+        root = self._project_with_texture(make_project)
+        (root / "tex.png").write_bytes(b"not a png at all")
+        load_project(root)  # config resolves: the file exists
+        with pytest.raises(ProjectError, match="could not read texture"):
+            load_image_array(root / "tex.png")
+
+    def test_zero_byte_image_file(self, make_project):
+        from shadertoy_local.channels import load_image_array
+
+        root = self._project_with_texture(make_project)
+        (root / "tex.png").write_bytes(b"")
+        with pytest.raises(ProjectError, match="could not read texture"):
+            load_image_array(root / "tex.png")
+
+    @pytest.mark.parametrize("mode", ["L", "LA", "P", "RGB", "RGBA", "1"])
+    def test_unusual_image_modes_are_converted(self, tmp_path, mode):
+        """Anything Pillow can open must arrive as RGBA."""
+        from PIL import Image
+
+        from shadertoy_local.channels import load_image_array
+
+        path = tmp_path / f"{mode}.png"
+        Image.new(mode, (4, 3)).save(path)
+        array = load_image_array(path)
+        assert array.shape == (3, 4, 4)
+        assert array.dtype == np.uint8
+
+    def test_directory_given_as_a_texture(self, make_project):
+        root = make_project(
+            {"image.glsl": PASSTHROUGH},
+            config={"image": {"channels": {"0": {"type": "texture", "source": "sub"}}}},
+        )
+        (root / "sub").mkdir()
+        with pytest.raises(ProjectError, match="not found"):
+            load_project(root)
+
+    def test_texture_escaping_the_project_root_still_resolves(self, make_project):
+        """Not forbidden, but it must resolve predictably rather than silently
+        producing a path inside the project."""
+        from PIL import Image
+
+        root = make_project({"image.glsl": PASSTHROUGH})
+        outside = root.parent / "outside.png"
+        Image.new("RGBA", (2, 2)).save(outside)
+        (root / "shadertoy.json").write_text(
+            json.dumps(
+                {"image": {"channels": {"0": {"type": "texture", "source": "../outside.png"}}}}
+            )
+        )
+        binding = load_project(root).passes["image"].channels[0]
+        assert binding.path == outside.resolve()
+
+
+class TestBuiltinEdges:
+    @pytest.mark.parametrize("size", [1, 2, 3, 5, 17])
+    def test_tiny_and_odd_builtin_sizes(self, size):
+        from shadertoy_local.channels import builtin_array
+
+        for name in ("noise", "checker", "uv", "gradient", "bayer", "blue-noise"):
+            array = builtin_array(name, size)
+            assert array.shape == (size, size, 4), (name, size)
+            assert array.dtype == np.uint8
+
+    def test_unknown_builtin_lists_the_options(self):
+        from shadertoy_local.channels import builtin_array
+
+        with pytest.raises(ProjectError, match="unknown builtin texture"):
+            builtin_array("perlin")
+
+    def test_builtins_are_reproducible(self):
+        """Golden tests depend on this."""
+        from shadertoy_local.channels import builtin_array
+
+        for name in ("noise", "gray-noise", "blue-noise", "bayer"):
+            assert np.array_equal(builtin_array(name, 32), builtin_array(name, 32))
+
+    def test_bayer_is_a_permutation(self):
+        """Every threshold level appears exactly once in an ordered-dither tile."""
+        from shadertoy_local.channels import builtin_array
+
+        values = builtin_array("bayer", 4)[..., 0].ravel()
+        assert len(set(values.tolist())) == 16
+
+
+class TestAnalysisEdges:
+    def test_one_pixel_frame(self):
+        from shadertoy_local.analysis import frame_stats, parse_probe, run_probe
+
+        array = np.array([[[0.25, 0.5, 0.75, 1.0]]], dtype=np.float32)
+        stats = frame_stats(array)
+        assert stats["pixels"] == 1
+        assert stats["is_uniform"] is True
+        result = run_probe(array, parse_probe("0,0"))
+        assert result["rgba"] == pytest.approx([0.25, 0.5, 0.75, 1.0])
+
+    def test_probe_on_negative_coordinates_clamps(self):
+        from shadertoy_local.analysis import Probe, run_probe
+
+        array = np.zeros((4, 4, 4), dtype=np.float32)
+        array[0, 0] = [1.0, 0.0, 0.0, 1.0]
+        assert run_probe(array, Probe(x=-5, y=-5))["rgba"][0] == pytest.approx(1.0)
+
+    def test_extreme_float_values(self):
+        from shadertoy_local.analysis import frame_stats, to_uint8_image
+
+        array = np.array(
+            [[[1e30, -1e30, 0.0, 1.0]]], dtype=np.float32
+        )
+        stats = frame_stats(array)
+        assert stats["finite"] is True
+        assert stats["fraction_above_one"] > 0
+        assert list(to_uint8_image(array)[0, 0]) == [255, 0, 0, 255]
+
+    def test_histogram_with_one_bin(self):
+        from shadertoy_local.analysis import histogram
+
+        array = np.zeros((4, 4, 4), dtype=np.float32)
+        assert histogram(array, bins=1)["r"] == [16]
+
+    def test_mixed_nan_and_inf_counts(self):
+        from shadertoy_local.analysis import frame_stats
+
+        array = np.zeros((2, 2, 4), dtype=np.float32)
+        array[0, 0, 0] = np.nan
+        array[0, 1, 1] = np.inf
+        array[1, 0, 2] = -np.inf
+        stats = frame_stats(array)
+        assert stats["nan_count"] == 1
+        assert stats["inf_count"] == 2
+        assert stats["finite"] is False
+
+    def test_probe_expectation_with_more_components_than_given(self):
+        from shadertoy_local.analysis import parse_probe, run_probe
+
+        array = np.array([[[1.0, 0.0, 0.0, 1.0]]], dtype=np.float32)
+        # Only the red channel is asserted.
+        assert run_probe(array, parse_probe("0,0=1"))["passed"] is True
+
+
+class TestGoldenEdges:
+    def test_corrupt_golden_file(self, tmp_path):
+        from shadertoy_local.golden import compare, golden_path
+
+        path = golden_path(tmp_path, "image_f0000")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"definitely not a png")
+        with pytest.raises(Exception):
+            compare(np.zeros((4, 4, 4), dtype=np.float32), tmp_path, "image_f0000")
+
+    def test_golden_with_nan_in_the_render(self, tmp_path):
+        """Non-finite pixels become 0 in the 8-bit view, so comparison still
+        works; frame_stats is what detects them."""
+        from shadertoy_local.golden import compare, write_golden
+
+        clean = np.zeros((4, 4, 4), dtype=np.float32)
+        write_golden(clean, tmp_path, "k")
+        broken = clean.copy()
+        broken[0, 0, 0] = np.nan
+        assert compare(broken, tmp_path, "k").passed
+
+    def test_one_pixel_golden(self, tmp_path):
+        from shadertoy_local.golden import compare, write_golden
+
+        array = np.full((1, 1, 4), 0.5, dtype=np.float32)
+        write_golden(array, tmp_path, "k")
+        assert compare(array, tmp_path, "k").passed
+
+
+# --------------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.gpu
+class TestRenderEdges:
+    def _render(self, root, gl_context, **kwargs):
+        from shadertoy_local.renderer import Renderer, RenderSettings
+
+        settings = RenderSettings(**{"width": 8, "height": 8, **kwargs})
+        renderer = Renderer(load_project(root), gl_context.ctx, settings)
+        renderer.compile()
+        return renderer.render_frame(), renderer
+
+    def test_one_by_one_render(self, make_project, gl_context):
+        capture, renderer = self._render(
+            make_project({"image.glsl": IMAGE}), gl_context, width=1, height=1
+        )
+        try:
+            assert capture.images["image"].shape == (1, 1, 4)
+        finally:
+            renderer.release()
+
+    def test_extremely_wide_aspect(self, make_project, gl_context):
+        capture, renderer = self._render(
+            make_project({"image.glsl": IMAGE}), gl_context, width=1024, height=1
+        )
+        try:
+            assert capture.images["image"].shape == (1, 1024, 4)
+        finally:
+            renderer.release()
+
+    def test_tiny_buffer_scale_clamps_to_one_pixel(self, make_project, gl_context):
+        """floor(8 * 0.01) is 0, which would be an invalid texture size."""
+        root = make_project(
+            {"image.glsl": PASSTHROUGH, "buffer_a.glsl": IMAGE},
+            config={
+                "buffer_a": {"scale": 0.01},
+                "image": {"channels": {"0": "buffer_a"}},
+            },
+        )
+        capture, renderer = self._render(root, gl_context, width=8, height=8)
+        try:
+            assert capture.images["buffer_a"].shape[:2] == (1, 1)
+        finally:
+            renderer.release()
+
+    def test_scale_of_exactly_one(self, make_project, gl_context):
+        root = make_project(
+            {"image.glsl": PASSTHROUGH, "buffer_a.glsl": IMAGE},
+            config={
+                "buffer_a": {"scale": 1.0},
+                "image": {"channels": {"0": "buffer_a"}},
+            },
+        )
+        capture, renderer = self._render(root, gl_context, width=16, height=8)
+        try:
+            assert capture.images["buffer_a"].shape[:2] == (8, 16)
+        finally:
+            renderer.release()
+
+    def test_all_four_buffers_chained(self, make_project, gl_context):
+        """A -> B -> C -> D -> Image, each adding one, exercises pass ordering."""
+        add = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    c = texture(iChannel0, f/iResolution.xy) + vec4(1.0);\n"
+            "}\n"
+        )
+        root = make_project(
+            {
+                "buffer_a.glsl": "void mainImage(out vec4 c, in vec2 f){ c = vec4(1.0); }\n",
+                "buffer_b.glsl": add,
+                "buffer_c.glsl": add,
+                "buffer_d.glsl": add,
+                "image.glsl": PASSTHROUGH,
+            },
+            config={
+                "buffer_b": {"channels": {"0": "buffer_a"}},
+                "buffer_c": {"channels": {"0": "buffer_b"}},
+                "buffer_d": {"channels": {"0": "buffer_c"}},
+                "image": {"channels": {"0": "buffer_d"}},
+            },
+        )
+        capture, renderer = self._render(root, gl_context, precharge=0)
+        try:
+            # Each pass sees the current frame's upstream output: 1, 2, 3, 4.
+            assert capture.images["image"][0, 0, 0] == pytest.approx(4.0)
+        finally:
+            renderer.release()
+
+    def test_unbound_channel_reads_as_zero(self, make_project, gl_context):
+        """Sampling an unbound iChannel must be defined, not garbage."""
+        source = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    c = texture(iChannel3, vec2(0.5)) + vec4(0.0, 0.0, 0.0, 1.0);\n"
+            "}\n"
+        )
+        capture, renderer = self._render(
+            make_project({"image.glsl": source}), gl_context
+        )
+        try:
+            assert np.isfinite(capture.images["image"]).all()
+        finally:
+            renderer.release()
+
+    def test_channel_resolution_is_zero_for_unbound(self, make_project, gl_context):
+        source = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    c = vec4(iChannelResolution[3].x, 0, 0, 1);\n"
+            "}\n"
+        )
+        capture, renderer = self._render(
+            make_project({"image.glsl": source}), gl_context
+        )
+        try:
+            assert capture.images["image"][0, 0, 0] == pytest.approx(0.0)
+        finally:
+            renderer.release()
+
+    def test_max_frames_boundary_is_inclusive(self, make_project, gl_context):
+        """Rendering exactly the limit is allowed; one more is not."""
+        from shadertoy_local.renderer import RenderError
+
+        root = make_project(
+            {"image.glsl": PASSTHROUGH, "buffer_a.glsl": IMAGE},
+            config={"image": {"channels": {"0": "buffer_a"}}},
+        )
+        capture, renderer = self._render(root, gl_context, frame=9, max_frames=10)
+        renderer.release()
+        assert capture.frame == 9
+
+        with pytest.raises(RenderError, match="would render 11 frames"):
+            self._render(root, gl_context, frame=10, max_frames=10)
+
+    def test_negative_capture_frame_is_rejected(self, make_project, gl_context):
+        from shadertoy_local.renderer import Renderer, RenderError, RenderSettings
+
+        renderer = Renderer(
+            load_project(make_project({"image.glsl": IMAGE})),
+            gl_context.ctx,
+            RenderSettings(width=4, height=4),
+        )
+        try:
+            renderer.compile()
+            with pytest.raises(RenderError, match="must be >= 0"):
+                list(renderer.run([-1]))
+        finally:
+            renderer.release()
+
+    def test_render_before_compile_is_an_error(self, make_project, gl_context):
+        from shadertoy_local.renderer import Renderer, RenderError, RenderSettings
+
+        renderer = Renderer(
+            load_project(make_project({"image.glsl": IMAGE})),
+            gl_context.ctx,
+            RenderSettings(),
+        )
+        try:
+            with pytest.raises(RenderError, match="no passes compiled"):
+                renderer.render_frame()
+        finally:
+            renderer.release()
+
+    def test_buffer_reading_a_pass_that_failed_to_compile(
+        self, make_project, gl_context
+    ):
+        """With collect_all, a good pass must not silently sample a dead one."""
+        from shadertoy_local.renderer import Renderer, RenderError, RenderSettings
+
+        root = make_project(
+            {
+                "buffer_a.glsl": "void mainImage(out vec4 c, in vec2 f){ c = nope; }\n",
+                "image.glsl": PASSTHROUGH,
+            },
+            config={"image": {"channels": {"0": "buffer_a"}}},
+        )
+        renderer = Renderer(
+            load_project(root), gl_context.ctx, RenderSettings(width=4, height=4)
+        )
+        try:
+            renderer.compile(collect_all=True)
+            with pytest.raises(RenderError, match="failed to compile"):
+                list(renderer.run([0]))
+        finally:
+            renderer.release()
+
+    def test_time_override_applies_only_to_the_captured_frame(
+        self, make_project, gl_context
+    ):
+        source = "void mainImage(out vec4 c, in vec2 f){ c = vec4(iTime,0,0,1); }\n"
+        capture, renderer = self._render(
+            make_project({"image.glsl": source}), gl_context, frame=10, time=42.0
+        )
+        try:
+            assert capture.images["image"][0, 0, 0] == pytest.approx(42.0)
+        finally:
+            renderer.release()
+
+    def test_release_is_idempotent(self, make_project, gl_context):
+        from shadertoy_local.renderer import Renderer, RenderSettings
+
+        renderer = Renderer(
+            load_project(make_project({"image.glsl": IMAGE})),
+            gl_context.ctx,
+            RenderSettings(width=4, height=4),
+        )
+        renderer.compile()
+        renderer.render_frame()
+        renderer.release()
+        renderer.release()  # must not raise
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+
+def _run(capsys, *argv):
+    from shadertoy_local.cli import main
+
+    code = main(list(argv))
+    captured = capsys.readouterr()
+    payload = None
+    if captured.out.strip():
+        try:
+            payload = json.loads(captured.out)
+        except json.JSONDecodeError:
+            payload = None
+    return code, payload, captured.err
+
+
+class TestResolutionParsing:
+    @pytest.mark.parametrize(
+        "spec,expected",
+        [
+            ("640x360", (640, 360)),
+            ("640X360", (640, 360)),
+            ("640,360", (640, 360)),
+            ("1x1", (1, 1)),
+        ],
+    )
+    def test_accepted_forms(self, spec, expected):
+        from shadertoy_local.cli import _parse_resolution
+
+        assert _parse_resolution(spec) == expected
+
+    @pytest.mark.parametrize(
+        "spec", ["640", "640x", "x360", "0x100", "100x0", "-5x10", "axb", "", "640x360x1"]
+    )
+    def test_rejected_forms(self, spec):
+        from shadertoy_local.cli import _parse_resolution
+
+        with pytest.raises(ValueError):
+            _parse_resolution(spec)
+
+
+@pytest.mark.gpu
+class TestCliEdges:
+    def test_output_path_is_an_existing_file(
+        self, capsys, make_project, tmp_path
+    ):
+        """Writing into a path that is a file must fail clearly, not traceback."""
+        root = make_project({"image.glsl": IMAGE})
+        blocker = tmp_path / "blocked"
+        blocker.write_text("i am a file")
+        code, _, err = _run(
+            capsys, "render", "-C", str(root), "-r", "8x8", "-o", str(blocker), "--json"
+        )
+        assert code != 0
+        assert "error" in err.lower() or "Error" in err
+
+    def test_unicode_project_directory(self, capsys, tmp_path):
+        root = tmp_path / "проект ✨"
+        root.mkdir()
+        (root / "image.glsl").write_text(IMAGE, encoding="utf-8")
+        code, payload, _ = _run(
+            capsys, "render", "-C", str(root), "-r", "8x8", "--no-write", "--json"
+        )
+        assert code == 0
+        assert payload["ok"] is True
+
+    def test_time_and_count_together(self, capsys, make_project):
+        """--time pins only the first captured frame; the rest advance normally."""
+        source = "void mainImage(out vec4 c, in vec2 f){ c = vec4(iTime,0,0,1); }\n"
+        root = make_project({"image.glsl": source})
+        code, payload, _ = _run(
+            capsys, "render", "-C", str(root), "-r", "4x4", "--no-write",
+            "--count", "2", "--every", "6", "--time", "9.0", "--stats", "--json",
+        )
+        assert code == 0
+        maxima = [
+            f["passes"]["image"]["stats"]["channels"]["r"]["max"]
+            for f in payload["frames"]
+        ]
+        assert maxima[0] == pytest.approx(9.0)
+        assert maxima[1] == pytest.approx(6 / 60)
+
+    def test_invalid_json_on_stdin(self, capsys, make_project, monkeypatch):
+        import io
+
+        root = make_project({"image.glsl": IMAGE})
+        monkeypatch.setattr("sys.stdin", io.StringIO("[{oops}]"))
+        code, payload, _ = _run(
+            capsys, "render", "-C", str(root), "--input", "-", "--no-write", "--json"
+        )
+        assert code == 2
+        assert "invalid input JSON" in payload["error"]
+
+    def test_input_file_that_does_not_exist(self, capsys, make_project):
+        root = make_project({"image.glsl": IMAGE})
+        code, payload, _ = _run(
+            capsys, "render", "-C", str(root), "--input", "nope.json",
+            "--no-write", "--json",
+        )
+        assert code == 2
+        assert "neither inline JSON" in payload["error"]
+
+    def test_probe_a_buffer_pass(self, capsys, make_project):
+        root = make_project(
+            {"image.glsl": PASSTHROUGH, "buffer_a.glsl": IMAGE},
+            config={"image": {"channels": {"0": "buffer_a"}}},
+        )
+        code, payload, _ = _run(
+            capsys, "probe", "-C", str(root), "-r", "8x8",
+            "-p", "buffer_a", "--at", "1,1", "--json",
+        )
+        assert code == 0
+        assert "buffer_a" in payload["passes"]
+
+    def test_keep_alpha_preserves_transparency(
+        self, capsys, make_project, tmp_path
+    ):
+        from shadertoy_local.analysis import load_png
+
+        source = "void mainImage(out vec4 c, in vec2 f){ c = vec4(1.0,0.0,0.0,0.25); }\n"
+        root = make_project({"image.glsl": source})
+        out = tmp_path / "a"
+        _run(
+            capsys, "render", "-C", str(root), "-r", "4x4", "-o", str(out),
+            "--keep-alpha", "--json",
+        )
+        assert load_png(out / "image.png")[0, 0, 3] == 64
+
+        out2 = tmp_path / "b"
+        _run(capsys, "render", "-C", str(root), "-r", "4x4", "-o", str(out2), "--json")
+        assert load_png(out2 / "image.png")[0, 0, 3] == 255
+
+    def test_quiet_suppresses_prose_but_not_errors(self, capsys, make_project):
+        broken = "void mainImage(out vec4 c, in vec2 f){ c = missing; }\n"
+        root = make_project({"image.glsl": broken})
+        code, _, err = _run(capsys, "check", "-C", str(root), "-q")
+        assert code == 1
+        assert "image.glsl" in err, "an error must survive --quiet"
+
+    def test_zero_resolution_is_rejected(self, capsys, make_project):
+        root = make_project({"image.glsl": IMAGE})
+        code, payload, _ = _run(
+            capsys, "render", "-C", str(root), "-w", "0", "--no-write", "--json"
+        )
+        assert code == 2
+        assert "positive" in payload["error"]
+
+    def test_bad_date_spec(self, capsys, make_project):
+        root = make_project({"image.glsl": IMAGE})
+        code, payload, _ = _run(
+            capsys, "render", "-C", str(root), "--date", "2024,1", "--no-write", "--json"
+        )
+        assert code == 2
+        assert "four numbers" in payload["error"]
+
+    def test_render_from_a_subdirectory(self, capsys, make_project):
+        """Project discovery walks upward, like git."""
+        root = make_project({"image.glsl": IMAGE})
+        nested = root / "a" / "b"
+        nested.mkdir(parents=True)
+        code, payload, _ = _run(
+            capsys, "render", "-C", str(nested), "-r", "4x4", "--no-write", "--json"
+        )
+        assert code == 0
+        assert payload["ok"] is True

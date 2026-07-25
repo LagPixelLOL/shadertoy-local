@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 
-from .compose import Origin
+from .compose import Origin, strip_comments
 from .diagnostics import Diagnostic
 from .project import Project
 
@@ -63,59 +63,6 @@ EXPLANATION = (
     "function parameter, or fill a uniforms struct once per pass "
     "(see examples/06-portable-common). Disable with --no-portability."
 )
-
-
-def strip_comments(source: str) -> str:
-    """Blank out comments while preserving line and column positions.
-
-    Replacing rather than deleting keeps every subsequent line number correct,
-    which matters because the whole point is to report accurate positions.
-    """
-    out: list[str] = []
-    index = 0
-    length = len(source)
-    in_line_comment = False
-    in_block_comment = False
-
-    while index < length:
-        char = source[index]
-        pair = source[index : index + 2]
-
-        if in_line_comment:
-            if char == "\n":
-                in_line_comment = False
-                out.append(char)
-            else:
-                out.append(" ")
-            index += 1
-            continue
-
-        if in_block_comment:
-            if pair == "*/":
-                in_block_comment = False
-                out.append("  ")
-                index += 2
-                continue
-            # Preserve newlines so line numbering survives block comments.
-            out.append("\n" if char == "\n" else " ")
-            index += 1
-            continue
-
-        if pair == "//":
-            in_line_comment = True
-            out.append("  ")
-            index += 2
-            continue
-        if pair == "/*":
-            in_block_comment = True
-            out.append("  ")
-            index += 2
-            continue
-
-        out.append(char)
-        index += 1
-
-    return "".join(out)
 
 
 def lint_common(project: Project) -> list[Diagnostic]:

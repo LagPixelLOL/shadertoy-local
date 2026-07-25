@@ -227,13 +227,26 @@ def to_uint8_image(array: np.ndarray, *, opaque: bool = True) -> np.ndarray:
 
 
 def save_png(array: np.ndarray, path: Path, *, opaque: bool = True) -> Path:
-    """Write a frame to a PNG."""
+    """Write a frame to a PNG.
+
+    Filesystem problems are reported as :class:`AnalysisError` rather than raw
+    OSErrors, so pointing ``-o`` at an existing file produces a sentence instead
+    of a traceback.
+    """
     from PIL import Image
 
     image = to_uint8_image(array, opaque=opaque)
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(image, mode="RGBA").save(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except (OSError, ValueError) as exc:
+        raise AnalysisError(
+            f"cannot create output directory {path.parent}: {exc}"
+        ) from exc
+    try:
+        Image.fromarray(image, mode="RGBA").save(path)
+    except (OSError, ValueError) as exc:
+        raise AnalysisError(f"cannot write {path}: {exc}") from exc
     return path
 
 

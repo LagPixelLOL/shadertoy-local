@@ -89,6 +89,59 @@ class ComposedShader:
         return "\n".join(out)
 
 
+def strip_comments(source: str) -> str:
+    """Blank out comments while preserving line and column positions.
+
+    Replacing rather than deleting keeps every subsequent line number correct,
+    which matters because the whole point is to report accurate positions.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(source)
+    in_line_comment = False
+    in_block_comment = False
+
+    while index < length:
+        char = source[index]
+        pair = source[index : index + 2]
+
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+                out.append(char)
+            else:
+                out.append(" ")
+            index += 1
+            continue
+
+        if in_block_comment:
+            if pair == "*/":
+                in_block_comment = False
+                out.append("  ")
+                index += 2
+                continue
+            # Preserve newlines so line numbering survives block comments.
+            out.append("\n" if char == "\n" else " ")
+            index += 1
+            continue
+
+        if pair == "//":
+            in_line_comment = True
+            out.append("  ")
+            index += 2
+            continue
+        if pair == "/*":
+            in_block_comment = True
+            out.append("  ")
+            index += 2
+            continue
+
+        out.append(char)
+        index += 1
+
+    return "".join(out)
+
+
 class _Builder:
     """Accumulates lines while tracking each line's origin."""
 
@@ -237,7 +290,9 @@ def compose_pass(
     builder.emit(_WRAPPER)
 
     source = "\n".join(builder.texts)
-    if not _MAIN_IMAGE_RE.search(source):
+    # Check the comment-stripped text: a commented-out definition would
+    # otherwise pass here and fail later as a confusing link error.
+    if not _MAIN_IMAGE_RE.search(strip_comments(source)):
         raise ProjectError(
             f"{rel_pass} defines no mainImage function.\n"
             "Every pass needs:\n"

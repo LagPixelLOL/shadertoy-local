@@ -245,14 +245,20 @@ def _build_settings(args: argparse.Namespace, project: Any) -> Any:
     height = project.default("height", 360)
     if getattr(args, "resolution", None):
         width, height = _parse_resolution(args.resolution)
-    if getattr(args, "width", None):
+    # `is not None` throughout, not truthiness: 0 is a value the user typed and
+    # must be rejected, not silently replaced by the default.
+    if getattr(args, "width", None) is not None:
         width = args.width
-    if getattr(args, "height", None):
+    if getattr(args, "height", None) is not None:
         height = args.height
     if width <= 0 or height <= 0:
         raise ValueError(f"resolution must be positive (got {width}x{height})")
 
-    fps = args.fps if getattr(args, "fps", None) else float(project.default("fps", 60.0))
+    fps = (
+        args.fps
+        if getattr(args, "fps", None) is not None
+        else float(project.default("fps", 60.0))
+    )
     if fps <= 0:
         raise ValueError(f"--fps must be positive (got {fps})")
 
@@ -298,7 +304,7 @@ def _build_settings(args: argparse.Namespace, project: Any) -> Any:
         precharge=precharge,
         max_frames=(
             args.max_frames
-            if getattr(args, "max_frames", None)
+            if getattr(args, "max_frames", None) is not None
             else DEFAULT_MAX_FRAMES
         ),
     )
