@@ -540,3 +540,89 @@ class TestStructTernaryFailsHard:
         assert code == EXIT_OK
         assert payload["warnings"] >= 1
         assert payload["errors"] == 0
+
+
+@pytest.mark.gpu
+class TestInfoRuntimeCheck:
+    """`info` compiles and runs a shader on every device by default."""
+
+    def test_reports_runtime_per_device(self, capsys):
+        code, payload, _ = run(capsys, "info", "--json")
+        assert code == EXIT_OK
+        assert payload["devices"], "expected at least one device"
+        for dev in payload["devices"]:
+            runtime = dev["runtime"]
+            assert runtime is not None, f"device {dev['index']} has no runtime result"
+            assert runtime["ok"] is True, f"device {dev['index']}: {runtime['error']}"
+            assert runtime["stage"] == "ok"
+            assert runtime["max_error"] is not None
+            assert runtime["shader_ms"] > 0
+            assert runtime["context_ms"] > 0
+
+    def test_software_devices_are_checked_too(self, capsys):
+        code, payload, _ = run(capsys, "info", "--json")
+        assert code == EXIT_OK
+        # Every enumerated device gets a verdict, software included.
+        assert all(d["runtime"] is not None for d in payload["devices"])
+
+    def test_human_output_mentions_runtime(self, capsys):
+        code, _, err = run(capsys, "info")
+        assert code == EXIT_OK
+        assert "runtime:" in err
+        assert "shader" in err
+
+    def test_can_be_skipped(self, capsys):
+        code, payload, err = run(capsys, "info", "--no-runtime-check", "--json")
+        assert code == EXIT_OK
+        assert all("runtime" not in d for d in payload["devices"])
+        assert "runtime:" not in err
+
+    def test_failing_device_is_surfaced(self, capsys, monkeypatch):
+        """A device that cannot run a shader must be reported as failing rather
+        than silently listed as present."""
+        from shadertoy_local.context import enumerate_devices
+        from shadertoy_local.selftest import RuntimeCheck
+
+        real = enumerate_devices()
+        broken = [
+            RuntimeCheck(
+                device_index=d.index,
+                ok=False,
+                stage="compile",
+                error="synthetic failure",
+            )
+            for d in real
+        ]
+        monkeypatch.setattr(
+            "shadertoy_local.selftest.check_all_devices", lambda **kw: broken
+        )
+        code, payload, err = run(capsys, "info", "--json")
+        assert code == EXIT_ENVIRONMENT
+        assert payload["ok"] is False
+        assert "synthetic failure" in err
+        assert "no device could compile and run a shader" in err
+
+    def test_partial_failure_still_succeeds(self, capsys, monkeypatch):
+        """One working device is enough for rendering to be possible."""
+        from shadertoy_local.context import enumerate_devices
+        from shadertoy_local.selftest import RuntimeCheck
+
+        real = enumerate_devices()
+        if len(real) < 2:
+            pytest.skip("needs at least two devices")
+        mixed = [
+            RuntimeCheck(
+                device_index=real[0].index, ok=True, stage="ok",
+                gl_version="4.6", context_ms=1.0, shader_ms=1.0, max_error=0.0,
+            ),
+            RuntimeCheck(
+                device_index=real[1].index, ok=False, stage="render",
+                error="synthetic failure",
+            ),
+        ]
+        monkeypatch.setattr(
+            "shadertoy_local.selftest.check_all_devices", lambda **kw: mixed
+        )
+        code, payload, _ = run(capsys, "info", "--json")
+        assert code == EXIT_OK
+        assert payload["ok"] is True

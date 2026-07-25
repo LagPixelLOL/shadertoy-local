@@ -317,24 +317,70 @@ def _parse_frame_list(text: str, default: int) -> list[int]:
 
 def cmd_info(args: argparse.Namespace) -> int:
     """Report GPU/EGL environment and, if present, the project layout."""
-    from .context import ContextError, probe_devices
+    from .context import ContextError, enumerate_devices, probe_devices
     from .project import ProjectError, load_project
+    from .selftest import check_all_devices
 
     report = _Reporter(args.json, args.quiet)
     payload: dict[str, Any] = {"version": __version__}
 
-    devices = probe_devices()
-    payload["devices"] = [d.to_dict() for d in devices]
-
     report.say(f"shadertoy-local {__version__}")
     report.say()
-    if devices:
-        report.say("EGL devices:")
-        for dev in devices:
-            kind = "software" if dev.is_software else "hardware"
-            report.say(f"  [{dev.index}] {dev.label}  ({kind})")
+
+    runtime_ok: list[bool] = []
+    if getattr(args, "runtime_check", True):
+        # Actually compile and run a shader on every device: enumerating one is
+        # no promise it can bind, and binding is no promise it renders correctly.
+        devices = enumerate_devices()
+        checks = check_all_devices(require=getattr(args, "gl_version", None))
+        by_index = {c.device_index: c for c in checks}
+        payload["devices"] = [
+            {
+                **dev.to_dict(),
+                # The check reports the renderer it actually bound, which is more
+                # trustworthy than a pre-context guess.
+                "renderer": (by_index.get(dev.index).renderer
+                             if dev.index in by_index else dev.renderer),
+                "runtime": by_index[dev.index].to_dict()
+                if dev.index in by_index
+                else None,
+            }
+            for dev in devices
+        ]
+        if not devices:
+            payload["devices"] = []
+            payload["runtime"] = [c.to_dict() for c in checks]
+
+        if devices:
+            report.say("EGL devices (with shader runtime check):")
+            for dev in devices:
+                check = by_index.get(dev.index)
+                kind = "software" if dev.is_software else "hardware"
+                label = (check.renderer if check and check.renderer else dev.label)
+                report.say(f"  [{dev.index}] {label}  ({kind})")
+                if check is not None:
+                    runtime_ok.append(check.ok)
+                    line = f"        runtime: {check.summary()}"
+                    if check.ok:
+                        report.say(line)
+                    else:
+                        report.warn(line)
+        else:
+            report.say("EGL devices: none enumerated")
+            for check in checks:
+                runtime_ok.append(check.ok)
+                line = f"  default device runtime: {check.summary()}"
+                report.say(line) if check.ok else report.warn(line)
     else:
-        report.say("EGL devices: none found")
+        devices = probe_devices()
+        payload["devices"] = [d.to_dict() for d in devices]
+        if devices:
+            report.say("EGL devices:")
+            for dev in devices:
+                kind = "software" if dev.is_software else "hardware"
+                report.say(f"  [{dev.index}] {dev.label}  ({kind})")
+        else:
+            report.say("EGL devices: none found")
 
     try:
         handle = _open_context(args)
@@ -370,6 +416,16 @@ def cmd_info(args: argparse.Namespace) -> int:
                 f"  {spec.label:<9} {spec.path.name}{scale}{suffix}"
             )
 
+    if runtime_ok and not any(runtime_ok):
+        report.warn(
+            "\nerror: no device could compile and run a shader; "
+            "rendering will not work here"
+        )
+        payload["ok"] = False
+        report.emit(payload)
+        return EXIT_ENVIRONMENT
+
+    payload["ok"] = True
     report.emit(payload)
     return EXIT_OK
 
@@ -980,6 +1036,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_project_args(info)
     _add_gpu_args(info)
+    info.add_argument(
+        "--no-runtime-check",
+        dest="runtime_check",
+        action="store_false",
+        default=True,
+        help=(
+            "only enumerate devices; skip compiling and running a verification "
+            "shader on each one"
+        ),
+    )
     info.set_defaults(func=cmd_info)
 
     # init

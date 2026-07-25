@@ -118,7 +118,7 @@ builtin if one is wrong.
 
 | Command | Purpose |
 |---|---|
-| `info` | GPU, EGL devices, active context, project layout |
+| `info` | GPU, EGL devices, active context, project layout; runs a verification shader on every device |
 | `init` | Scaffold a project (`basic`, `common`, `feedback`, `input`) |
 | `check` | Compile every pass, report errors. No rendering |
 | `render` | Render frames to PNG |
@@ -316,8 +316,41 @@ automatically — a software rasterizer is refused unless you pass
 `--allow-software`, since silently falling back to llvmpipe turns a 1 ms render
 into a 1 s one.
 
-Check the environment with `shadertoy info`. If EGL setup is incomplete the
-error explains the fix; on Debian/Ubuntu with NVIDIA that is usually:
+### Verifying the environment
+
+`shadertoy info` does not merely list devices — it compiles and runs a small
+shader on **each** one and checks the output pixel by pixel:
+
+```
+$ shadertoy info
+EGL devices (with shader runtime check):
+  [0] NVIDIA RTX PRO 6000 Blackwell Server Edition/PCIe/SSE2  (hardware)
+        runtime: ok    4.6.0 NVIDIA 580.95.05  shader 3.28 ms  (context 138 ms)
+  [1] llvmpipe (LLVM 21.1.8, 256 bits)  (software)
+        runtime: ok    4.5 (Core Profile) Mesa 26.0.3  shader 15.69 ms  (context 57 ms)
+```
+
+Enumerating a device proves nothing: it may refuse to bind, bind but fail to
+compile, or compile but render incorrectly. The check therefore exercises exactly
+what a real pass depends on — the vertex path, `gl_FragCoord`, scalar, vector and
+**array** uniforms, an `RGBA32F` target holding values above 1.0, and readback —
+then compares every pixel against values computed on the CPU. A driver that
+renders *something* but renders it wrongly fails rather than passes.
+
+Failures report the stage reached, so the cause is narrowed immediately:
+
+```
+        runtime: FAILED at compile: GLSL Compiler failed
+        runtime: FAILED at verify: rendered image differs from expected by 0.01875
+```
+
+Context creation time is reported separately from shader time, because the former
+is dominated by one-time driver initialisation and would otherwise make a fast GPU
+look slower than a CPU rasterizer. `info` exits 3 if no device can run a shader,
+and `--no-runtime-check` skips it for a quick listing.
+
+If EGL setup is incomplete the error explains the fix; on Debian/Ubuntu with
+NVIDIA that is usually:
 
 ```bash
 apt-get install -y --no-install-recommends libegl1
