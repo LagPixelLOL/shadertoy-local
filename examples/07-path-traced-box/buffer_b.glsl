@@ -90,9 +90,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // 15 seconds, so a history worth ~14 frames costs nothing in lag and buys
     // the quietest image; the only thing the filter has to keep up with is the
     // camera, which the motion term already handles.
+    // GAMMA bounds the history to the current frame's neighbourhood, and it only
+    // needs to be tight while the camera moves -- that is what stops stale history
+    // ghosting across a disocclusion. Keeping it tight when nothing is moving is
+    // actively harmful: clamping into m1 +- GAMMA*sig every frame, with sig
+    // estimated from nine samples of a right-skewed distribution, ratchets a
+    // converged pixel downwards. Measured at 1440p, 2.4 cost 10.25/255 of
+    // brightness on the pedestal against a 48 spp reference, for 0.02/255 less
+    // noise; and during a fast drag, 2.4 and 10.0 track that reference identically
+    // (2.29 either way), because the motion term below has already taken over.
     float motion = valid ? length(fcPrev - fragCoord) : 1e3;
     float mf = clamp((motion - 0.4) / 6.0, 0.0, 1.0);
-    float GAMMA = mix(2.4, 1.0, mf);
+    float GAMMA = mix(10.0, 1.0, mf);
     float alpha = mix(0.07, 0.38, mf);
     vec3 lo = m1 - GAMMA * sig, hi = m1 + GAMMA * sig;
 
