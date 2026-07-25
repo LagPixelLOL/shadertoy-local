@@ -207,7 +207,26 @@ shadertoy render --frame 100 --count 3 --every 10  # frames 100, 110, 120
 shadertoy render --count 8 --every 4 --precharge 20
 ```
 
-Frames between captures are still rendered, since they are part of the history.
+**Frames between captures are really rendered.** `--count 3 --every 20` draws
+frames 0..40 and saves three of them; it does not draw only three. Skipping the
+gaps would corrupt accumulation, since each capture would then hold the history of
+only the frames actually drawn. With an accumulating buffer:
+
+```
+captured frame   0  ->  accumulator =  1
+captured frame  20  ->  accumulator = 21     # not 2
+captured frame  40  ->  accumulator = 41     # not 3
+```
+
+`--precharge` governs only the run-up *before the first* capture, never the gaps
+between captures — so `--precharge 0 --count 3 --every 20` still renders frames
+0..40, it just starts the accumulator cold at the first one.
+
+The one exception is a project with **no buffer passes**: nothing accumulates,
+each frame is a pure function of its uniforms, so only the captured frames are
+drawn. `--every 200` then costs no more than `--every 20`. There is a test
+asserting the skipped and unskipped results are byte-identical, which is what
+makes the optimisation safe.
 
 ## Simulated input
 

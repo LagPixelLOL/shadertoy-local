@@ -1240,3 +1240,136 @@ class TestPrechargeOnStatelessShaders:
                 renderer.release()
 
         assert np.array_equal(render(None), render(precharge))
+
+
+@pytest.mark.gpu
+class TestInBetweenFramesAreRendered:
+    """`--count 3 --every 20` must render frames 1..39 too, not just the three
+    captured ones. Skipping them would corrupt any accumulation: the captures
+    would each hold the history of only the frames actually drawn.
+
+    The buffer here increments once per render, so its value *is* the number of
+    frames rendered, which measures the timeline directly instead of trusting it.
+    """
+
+    COUNTER = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = texture(iChannel0, f/iResolution.xy) + vec4(1.0);\n"
+        "}\n"
+    )
+
+    def _accumulators(self, make_project, gl_context, frames, **kwargs):
+        from shadertoy_local.renderer import Renderer, RenderSettings
+
+        root = make_project(
+            {"buffer_a.glsl": self.COUNTER, "image.glsl": PASSTHROUGH},
+            config={
+                "buffer_a": {"channels": {"0": "buffer_a"}},
+                "image": {"channels": {"0": "buffer_a"}},
+            },
+        )
+        renderer = Renderer(
+            load_project(root),
+            gl_context.ctx,
+            RenderSettings(**{"width": 16, "height": 16, **kwargs}),
+        )
+        renderer.compile()
+        try:
+            return {
+                cap.frame: round(float(cap.images["buffer_a"][0, 0, 0]))
+                for cap in renderer.run(frames)
+            }
+        finally:
+            renderer.release()
+
+    def test_gaps_are_filled(self, make_project, gl_context):
+        result = self._accumulators(make_project, gl_context, [0, 20, 40])
+        assert result == {0: 1, 20: 21, 40: 41}
+
+    def test_large_stride(self, make_project, gl_context):
+        result = self._accumulators(make_project, gl_context, [0, 100])
+        assert result == {0: 1, 100: 101}
+
+    def test_precharge_trims_the_runup_but_not_the_gaps(
+        self, make_project, gl_context
+    ):
+        """precharge governs only what precedes the first capture."""
+        result = self._accumulators(
+            make_project, gl_context, [20, 40, 60], precharge=5
+        )
+        assert result == {20: 6, 40: 26, 60: 46}
+        gaps = sorted(result.values())
+        assert gaps[1] - gaps[0] == 20 and gaps[2] - gaps[1] == 20
+
+    def test_precharge_zero_still_fills_gaps(self, make_project, gl_context):
+        result = self._accumulators(
+            make_project, gl_context, [20, 40, 60], precharge=0
+        )
+        assert result == {20: 1, 40: 21, 60: 41}
+
+    def test_unordered_capture_list_is_still_contiguous(
+        self, make_project, gl_context
+    ):
+        result = self._accumulators(make_project, gl_context, [40, 0, 20])
+        assert result == {0: 1, 20: 21, 40: 41}
+
+    def test_duplicate_capture_frames_are_collapsed(self, make_project, gl_context):
+        result = self._accumulators(make_project, gl_context, [10, 10, 10])
+        assert result == {10: 11}
+
+    def test_stateless_project_skips_the_gaps(self, make_project, gl_context):
+        """With nothing to accumulate, rendering the gaps would be pure waste, so
+        only the captured frames are drawn -- and the result is identical."""
+        from shadertoy_local.renderer import Renderer, RenderSettings
+
+        source = "void mainImage(out vec4 c, in vec2 f){ c = vec4(fract(iTime),0,0,1); }\n"
+        root = make_project({"image.glsl": source})
+
+        def render(frames, **kwargs):
+            renderer = Renderer(
+                load_project(root),
+                gl_context.ctx,
+                RenderSettings(**{"width": 16, "height": 16, **kwargs}),
+            )
+            renderer.compile()
+            try:
+                return {c.frame: c.images["image"].copy() for c in renderer.run(frames)}
+            finally:
+                renderer.release()
+
+        skipped = render([0, 50])
+        forced = render([0, 50], precharge="all")
+        for frame in (0, 50):
+            assert np.array_equal(skipped[frame], forced[frame]), (
+                f"frame {frame} differs, so skipping the gaps was not safe"
+            )
+
+
+@pytest.mark.gpu
+class TestCountEveryContiguityViaCli:
+    def test_cli_count_every_fills_gaps(self, capsys, make_project):
+        root = make_project(
+            {
+                "buffer_a.glsl": TestInBetweenFramesAreRendered.COUNTER,
+                "image.glsl": (
+                    "void mainImage(out vec4 c, in vec2 f){\n"
+                    "    c = texture(iChannel0, f/iResolution.xy) / 1000.0;\n"
+                    "}\n"
+                ),
+            },
+            config={
+                "buffer_a": {"channels": {"0": "buffer_a"}},
+                "image": {"channels": {"0": "buffer_a"}},
+            },
+        )
+        code, payload, _ = _run(
+            capsys, "render", "-C", str(root), "-r", "16x16",
+            "--count", "3", "--every", "20", "--no-write", "--stats", "--json",
+        )
+        assert code == 0
+        counts = [
+            round(f["passes"]["image"]["stats"]["channels"]["r"]["max"] * 1000)
+            for f in payload["frames"]
+        ]
+        assert [f["frame"] for f in payload["frames"]] == [0, 20, 40]
+        assert counts == [1, 21, 41]
