@@ -439,6 +439,7 @@ class TestExamples:
             "04-textured",
             "05-interactive",
             "06-portable-common",
+            "07-path-traced-box",
         ],
     )
     def test_example_renders(self, name, gl_context):

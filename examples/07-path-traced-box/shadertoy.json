@@ -1,0 +1,83 @@
+{
+  "name": "path-traced-box",
+  "description": "Five-pass path tracer: a box scene with a volumetric frosted globe, mirror and glass balls, denoised by temporal accumulation plus three a-trous wavelet passes. Drag the mouse to aim the camera.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "buffer_a": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "buffer_b": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_b",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "buffer_c": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_b",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "buffer_d": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_c",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "image": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_d",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  }
+}

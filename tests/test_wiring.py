@@ -223,7 +223,7 @@ class TestBlockers:
         assert report.blockers == []
 
     def test_shipped_examples_report_honestly(self):
-        """01-03, 05 and 06 should port cleanly; 04 deliberately cannot."""
+        """Everything but 04 should port cleanly; 04 deliberately cannot."""
         from .conftest import EXAMPLES_DIR
 
         expected_portable = {
@@ -233,6 +233,7 @@ class TestBlockers:
             "04-textured": False,
             "05-interactive": True,
             "06-portable-common": True,
+            "07-path-traced-box": True,
         }
         for name, portable in expected_portable.items():
             report = build_report(load_project(EXAMPLES_DIR / name))

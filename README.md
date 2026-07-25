@@ -534,6 +534,7 @@ Each directory in `examples/` is a runnable project with its own
 | `04-textured` | Builtin textures across filter/wrap modes |
 | `05-interactive` | Keyboard rows and `iMouse` |
 | `06-portable-common` | Uniform-struct protocol for a lint-clean Common tab |
+| `07-path-traced-box` | All five passes at once: a path tracer plus a denoiser |
 
 ```bash
 shadertoy render -C examples/03-feedback-trail --frame 120
