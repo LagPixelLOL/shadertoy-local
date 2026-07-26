@@ -149,6 +149,31 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float t0, t1;
     if (boxRange(ro, rd, t0, t1)) {
         vec3 sunCol = SUN_RADIANCE * sunTransmittance(sd);
+
+        // The ambient refill floor's strength, against the calibration key:
+        // see ambientScatter. Two factors, both geometric. Reddening -- a
+        // low sun delivers less to the walls that feed the creases, so the
+        // ratio is of *transmittances*, evaluated at the same radiance on
+        // both sides: the skylight this floor multiplies already scales
+        // with the source, and scaling the floor by total radiance as well
+        // double-dimmed it, which crushed the moonlit crown to soot under
+        // rims of chalk. And direction: the refill comes off the *visible*
+        // walls, and when the sun stands behind the crown the walls the
+        // camera sees are the unlit ones, so there is nothing to refill
+        // from. Without that factor a backlit crown rendered with the same
+        // gentle shading as a lateral one, and the lit-versus-unlit
+        // contrast the geometry should produce was simply missing
+        // (reported twice before it was found).
+        const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+        vec3 keyCol = KEY_RADIANCE * sunTransmittance(keySunDirection());
+        vec3 nowCol = KEY_RADIANCE * sunTransmittance(sd);
+        float refill = clamp(dot(nowCol, LUMA) / dot(keyCol, LUMA), 0.0, 1.0);
+
+        vec3 roC, rdC;
+        cameraRay(iResolution.xy * 0.5, iResolution, ang, roC, rdC);
+        float gNow = 0.5 + 0.5 * dot(sd, -rdC);
+        float gKey = 0.5 + 0.5 * dot(keySunDirection(), -rdC);
+        refill *= clamp(pow(max(gNow, 1e-3) / gKey, 0.6), 0.0, 1.2);
         vec3 skyLight = mix(skyRadiance(vec3(0.0, 1.0, 0.0), sd),
                             skyRadiance(normalize(vec3(sd.x, 0.22, sd.z)), sd),
                             0.15) * 3.8;
@@ -229,7 +254,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 }
 
                 vec3 source = sunScatter(opticalDepth, mu, sunCol) +
-                              ambientScatter(skyLight, skyDepth, opticalDepth);
+                              ambientScatter(skyLight, skyDepth, opticalDepth, refill);
                 source *= ALBEDO;
 
                 // Energy-conserving integration of the segment. Analytically
@@ -257,5 +282,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         }
     }
 
-    fragColor = vec4(scattered, transmittance);
+    // The march stops at MIN_TRANSMITTANCE, so the stored alpha of a fully
+    // opaque core is not zero, it is the cutoff -- and one percent is not
+    // "below the dither floor" when what is behind the cloud is the solar
+    // disc, five thousand times brighter than the sky around it. Left as-is,
+    // the disc burned a white patch through the thickest part of the crown
+    // whenever the sun sat behind it. Remapping the cutoff to zero costs the
+    // genuinely translucent fringes under one percent of their throughput
+    // and makes "the ray gave up" mean what it should: opaque.
+    float alpha = max(0.0, (transmittance - MIN_TRANSMITTANCE) /
+                           (1.0 - MIN_TRANSMITTANCE));
+    fragColor = vec4(scattered, alpha);
 }

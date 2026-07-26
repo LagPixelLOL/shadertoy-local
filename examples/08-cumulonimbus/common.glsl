@@ -705,7 +705,19 @@ vec3 skyRadiance(vec3 rd, vec3 sd) {
     // grade in tonemap().
     vec3 msTint = BETA_R / BETA_R.b;
     vec3 msT = exp(-ZENITH_OD * airMass(max(sd.y, 0.35)));
-    col += SUN_RADIANCE * MS_STRENGTH * msTint * msT * view * max(sd.y, 0.0);
+
+    // The elevation factor is a smoothstep, not max(sd.y, 0.0), because the
+    // linear factor killed this term at exactly the elevations it exists
+    // for: at a four-degree sun it scaled the multiple-scattering blue by
+    // 0.07, the single-scattered dome underneath is grey-brown there, and
+    // the fixed sky grade -- calibrated to correct a *blue* sky -- pushed
+    // the result olive-green. Second-order light is gathered from the whole
+    // bright hemisphere, and the hemisphere does not dim in proportion to
+    // the solar elevation until the sun is actually setting; the constant in
+    // front keeps the product at the calibration elevation what the linear
+    // factor gave there, so the daytime sky does not move.
+    col += SUN_RADIANCE * MS_STRENGTH * msTint * msT * view *
+           0.26 * smoothstep(-0.25, 0.20, sd.y);
     return col;
 }
 
@@ -785,7 +797,7 @@ vec3 sunScatter(float opticalDepth, float mu, vec3 sunCol) {
 // silhouette with no structure in it at all. On a cloud lit this laterally that
 // is half the frame, and the seams between turrets are precisely where the eye
 // is reading the shape.
-vec3 ambientScatter(vec3 skyLight, float skyOD, float sunOD) {
+vec3 ambientScatter(vec3 skyLight, float skyOD, float sunOD, float refill) {
     // Rational falloff, not exponential. Beer's law is the transmittance of an
     // unscattered beam, and skylight reaching a point a few hundred metres
     // inside a cloud has not been a beam for a long time -- it has diffused,
@@ -822,7 +834,16 @@ vec3 ambientScatter(vec3 skyLight, float skyOD, float sunOD) {
     // radiance field inside the cloud stops falling because it is being fed
     // laterally from the walls. A pure falloff of any shape reaches zero
     // eventually and renders wells the photograph does not contain.
-    return amb * (0.62 + 0.38 / (1.0 + skyOD * 0.36));
+    //
+    // *refill* is how bright those walls actually are: the luminance the sun
+    // delivers now over what it delivered at the calibration key, clamped to
+    // one. The floor is refill light, so it has to scale with its source --
+    // held constant it welds the lit-to-shaded contrast to the calibration
+    // sun's, and a low red sun then renders with midday's gentle shading
+    // instead of the near-chiaroscuro a four-degree sun actually produces.
+    // (That was visible, and reported, before it was explained.)
+    float f = 0.62 * refill;
+    return amb * (f + (1.0 - f) / (1.0 + skyOD * 0.36));
 }
 
 // ---- display --------------------------------------------------------------
@@ -849,6 +870,9 @@ const float KEY_AZIMUTH   = -1.80;
 const float KEY_ELEVATION =  0.26;
 const vec3  KEY_RADIANCE  = vec3(1.00, 0.98, 0.95) * 22.0;
 
+// The background's own gain on top of the scene exposure; see the image pass.
+const float SKY_GAIN = 1.85;
+
 // What the key light delivers to the crown, up to one shared constant: the
 // transmitted solar luminance through the first scattering order's phase at
 // the viewing geometry (which is what makes a backlit sun three stops hotter
@@ -858,7 +882,17 @@ float keyLuminance(vec3 radiance, vec3 sd, vec3 rdC) {
     const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
     vec3 sunCol = radiance * sunTransmittance(sd);
     float mu = clamp(dot(rdC, sd), -1.0, 1.0);
-    float ph = cloudPhase(mu, 1.0) + 0.08;
+
+    // The phase term is compressed above the knee, because a light meter
+    // has to measure what fills the frame, not what blazes at its edges.
+    // Toward dead-on backlight the forward lobe grows past 0.4 -- but that
+    // radiance belongs only to the thin rims and translucent tops, while
+    // the bulk of a backlit crown is its unlit side. Metering the full lobe
+    // exposed for the silver lining and buried the rest of the frame two
+    // stops down, in daylight. Below the knee -- every lateral and frontal
+    // sun -- the meter is untouched.
+    float ph = cloudPhase(mu, 1.0);
+    ph = ph / (1.0 + 2.2 * max(ph - 0.15, 0.0)) + 0.08;
     // The sky term scales with the requested radiance: skyRadiance reads the
     // live SUN_RADIANCE internally and is linear in it, so it is rescaled to
     // whichever radiance this evaluation is about -- a no-op for the live
@@ -879,30 +913,46 @@ vec3 keySunDirection() {
 // exposure is a camera property; feeding the per-pixel ray through this would
 // vignette the frame with the phase function.
 //
-// The normalisation is asymmetric on purpose, the way a photographer's is.
-// A scene brighter than the calibration sun is exposed all the way down --
-// highlights are unrecoverable, and "too bright" is never the picture anyone
-// wanted. A scene dimmer than it is only partially compensated: full
-// normalisation renders a moonlit night indistinguishable from noon, which
-// is exactly the "day for night" look this is trying not to have. At 0.55,
-// the 4.5 stops between the calibration sun and a full moon come back as
-// two stops of darkness on film -- luminous cloud, unmistakably night.
+// The key's deviation from calibration is split into two factors that are
+// deliberately not compensated alike, because they mean different things:
+//
+//   geometry   where the sun is: elevation, transmittance, phase. Restored
+//              almost fully -- a backlit noon is still noon, and a camera
+//              would meter it back to a daylight frame. The small residual
+//              is what lets a sunset read a shade dimmer than midday.
+//
+//   radiance   how much light there is: sun against moon. Restored by half,
+//              in stops -- full restoration is "day for night", the one look
+//              this must not have. Dim the source four stops and the frame
+//              keeps two of them.
+//
+// The first version compensated one combined ratio and the two failure modes
+// arrived as a matched pair: a backlit day buried two stops down, and a
+// moonlit night boosted back to daylight. Both reported, same root cause.
+// Scenes brighter than calibration are exposed all the way down on either
+// axis -- highlights are unrecoverable and "too bright" is never the frame
+// anyone wanted.
 float sceneExposure(vec3 sd, vec3 rdC) {
-    float ref = keyLuminance(KEY_RADIANCE, keySunDirection(), rdC);
-    float now = max(keyLuminance(SUN_RADIANCE, sd, rdC), 1e-5);
-    float r = ref / now;
-    return EXPOSURE * pow(r, r > 1.0 ? 0.55 : 1.0);
+    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+    float rGeo = keyLuminance(KEY_RADIANCE, keySunDirection(), rdC) /
+                 max(keyLuminance(KEY_RADIANCE, sd, rdC), 1e-5);
+    float rRad = dot(KEY_RADIANCE, LUMA) / max(dot(SUN_RADIANCE, LUMA), 1e-5);
+    return EXPOSURE * pow(rGeo, rGeo > 1.0 ? 0.85 : 1.0)
+                    * pow(rRad, rRad > 1.0 ? 0.50 : 1.0);
 }
 
-// How far into night the scene is: 0 in any daylight, 1 by full moon (the
-// key light five stops or more below calibration). Drives the Purkinje shift
-// in the image pass -- rod vision keeps no colour and the blue receptors
-// give out last, so a moonlit cloud is dim, blue-grey and nearly
-// monochrome, which no amount of exposure arithmetic produces by itself.
-float nightness(vec3 sd, vec3 rdC) {
-    float stops = log2(keyLuminance(KEY_RADIANCE, keySunDirection(), rdC) /
-                       max(keyLuminance(SUN_RADIANCE, sd, rdC), 1e-5));
-    return smoothstep(2.5, 5.0, stops);
+// How far into night the scene is: 0 in any daylight, 1 by full moon.
+// Keyed on the source radiance alone -- what makes night night is that the
+// light is a moon, not that the sun stands in an awkward place; keying this
+// on the full metered ratio made a backlit noon start to turn blue. Drives
+// the Purkinje shift in the image pass -- rod vision keeps no colour and
+// the blue receptors give out last, so a moonlit cloud is dim, blue-grey
+// and nearly monochrome, which no exposure arithmetic produces by itself.
+float nightness() {
+    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+    float stops = log2(dot(KEY_RADIANCE, LUMA) /
+                       max(dot(SUN_RADIANCE, LUMA), 1e-5));
+    return smoothstep(1.5, 4.0, stops);
 }
 
 // Narkowicz's fit of the ACES filmic curve. A sunlit turret against a shadowed

@@ -32,7 +32,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Everything behind the storm: sky, and the sun if it is in this pixel. The
     // cloud's own transmittance is what hides it, which is why the disc dims
     // and reddens as an anvil edge drifts across it without any special case.
-    vec3 background = skyRadiance(rd, sd) + sunDisc(rd, sd);
+    //
+    // The gain is the sky's share of the exposure split. The scene exposure
+    // is keyed to the crown -- it came down by nearly a stop to take the lit
+    // faces off the tone curve's shoulder -- and the sky, which was
+    // calibrated against the reference photograph at the old exposure, came
+    // down with it and went dark. A real camera cannot expose the two
+    // separately; a real camera also does not have this sky model's missing
+    // scattering orders, so the gain is doing double duty as the correction
+    // the grade alone could not carry.
+    vec3 background = (skyRadiance(rd, sd) + sunDisc(rd, sd)) * SKY_GAIN;
     vec3 col = background * cloud.a + cloud.rgb;
 
     vec2 sunCoord = cameraProject(sd, iResolution, ang);
@@ -69,7 +78,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // monochrome before the tone curve ever sees it.
     vec3 roC, rdC;
     cameraRay(iResolution.xy * 0.5, iResolution, ang, roC, rdC);
-    float night = nightness(sd, rdC);
+    float night = nightness();
     if (night > 0.0) {
         float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
         col = mix(col, l * vec3(0.62, 0.90, 1.45), 0.85 * night);
