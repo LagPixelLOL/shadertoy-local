@@ -67,6 +67,32 @@ class TestUsage:
         assert code == EXIT_USAGE
         assert "unknown key" in payload["error"]
 
+    def test_off_canvas_mouse_position(self, capsys, make_project, simple_image):
+        """The CLI is where the resolution is known, so this is where it fires."""
+        root = make_project({"image.glsl": simple_image})
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "-r", "320x240", "--json",
+            "--input", '[{"frame": 0, "op": "mouse_down", "pos": [69420, -69]}]',
+        )
+        assert code == EXIT_USAGE
+        assert "outside the 320x240 canvas" in payload["error"]
+
+    def test_off_canvas_check_uses_the_requested_resolution(
+        self, capsys, make_project, simple_image
+    ):
+        """The bound is the canvas actually being rendered, not a fixed number."""
+        root = make_project({"image.glsl": simple_image})
+        messages = []
+        for resolution in ("320x240", "100x50"):
+            code, payload, _ = run(
+                capsys, "render", "-C", str(root), "-r", resolution, "--json",
+                "--input", '[{"frame": 0, "op": "mouse_down", "pos": [400, 10]}]',
+            )
+            assert code == EXIT_USAGE
+            messages.append(payload["error"])
+        assert "0..320" in messages[0]
+        assert "0..100" in messages[1]
+
     def test_unknown_pass(self, capsys, make_project, simple_image):
         root = make_project({"image.glsl": simple_image})
         code, payload, _ = run(
@@ -175,6 +201,18 @@ class TestTimingSummary:
 
 @pytest.mark.gpu
 class TestRender:
+    def test_in_canvas_mouse_position_renders(
+        self, capsys, make_project, simple_image
+    ):
+        """The counterpart to the rejection: a position that fits is untouched."""
+        root = make_project({"image.glsl": simple_image})
+        code, payload, _ = run(
+            capsys, "render", "-C", str(root), "-r", "320x240", "--no-write", "--json",
+            "--input", '[{"frame": 0, "op": "mouse_down", "pos": [319, 239]}]',
+        )
+        assert code == EXIT_OK
+        assert payload["settings"]["inputs"]["events"][0]["pos"] == [319.0, 239.0]
+
     def test_writes_a_png(self, capsys, make_project, simple_image, tmp_path):
         root = make_project({"image.glsl": simple_image})
         out = tmp_path / "renders"

@@ -284,6 +284,153 @@ class TestMouseEvaluation:
             timeline([{"frame": 0, "op": "mouse_up", "normalized": True}])
 
 
+class TestPointerBounds:
+    """The pointer is confined to the canvas, as it is on shadertoy.com.
+
+    The site attaches its listeners to the canvas element with no pointer
+    capture, so an event outside it never fires and ``iMouse`` cannot hold an
+    off-canvas value. Accepting one locally would let a shader be tuned against
+    input that the site can never deliver.
+    """
+
+    def _at(self, pos, **extra):
+        return [{"frame": 0, "op": "mouse_move", "pos": pos, **extra}]
+
+    @pytest.mark.parametrize(
+        "pos,axis",
+        [
+            ([69420, 180], "x"),
+            ([320, 9999], "y"),
+            ([-1, 180], "x"),
+            ([320, -69.42], "y"),
+            ([640.5, 180], "x"),
+            ([320, 360.5], "y"),
+        ],
+    )
+    def test_off_canvas_pixels_are_rejected(self, pos, axis):
+        with pytest.raises(InputError, match=f"pos {axis}=.*outside the 640x360"):
+            InputTimeline.from_spec(self._at(pos), 60.0, 640, 360)
+
+    @pytest.mark.parametrize("pos", [[0, 0], [640, 360], [320.5, 180.25], [0, 360]])
+    def test_on_canvas_pixels_are_accepted(self, pos):
+        """Bounds are inclusive: the canvas spans [0, width] continuously."""
+        line = InputTimeline.from_spec(self._at(pos), 60.0, 640, 360)
+        assert line.events[0].pos == (float(pos[0]), float(pos[1]))
+
+    def test_bounds_follow_the_actual_resolution(self):
+        """200 is fine on a wide canvas and off a narrow one."""
+        assert InputTimeline.from_spec(self._at([200, 20]), 60.0, 640, 360).active
+        with pytest.raises(InputError, match=r"outside the 100x50 canvas \(0\.\.100\)"):
+            InputTimeline.from_spec(self._at([200, 20]), 60.0, 100, 50)
+
+    def test_negative_is_rejected_even_without_a_resolution(self):
+        """No upper bound is knowable, but a negative coordinate is still wrong.
+
+        iMouse.zw encodes the button state in its signs and mouse_vec4 takes
+        abs() of the anchor, so a negative press position would be silently
+        flipped positive instead of surviving to be noticed.
+        """
+        with pytest.raises(InputError, match="pos y=-5 is outside the canvas"):
+            InputTimeline.from_spec(self._at([10, -5]))
+
+    def test_large_positive_passes_without_a_resolution(self):
+        """The library stays usable with no render target; the CLI supplies one."""
+        assert InputTimeline.from_spec(self._at([69420, 180])).active
+
+    @pytest.mark.parametrize("pos", [[1.5, 0.5], [0.5, -0.25], [0.5, 2]])
+    def test_normalized_outside_unit_range_is_rejected(self, pos):
+        with pytest.raises(InputError, match=r"normalized pos [xy]=.*outside the"):
+            InputTimeline.from_spec(self._at(pos, normalized=True), 60.0, 640, 360)
+
+    @pytest.mark.parametrize("pos", [[0, 0], [1, 1], [0.5, 0.25]])
+    def test_normalized_unit_range_is_accepted(self, pos):
+        line = InputTimeline.from_spec(self._at(pos, normalized=True), 60.0, 640, 360)
+        assert line.events[0].normalized
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+    def test_non_finite_is_rejected(self, bad):
+        with pytest.raises(InputError, match="must be a finite number"):
+            InputTimeline.from_spec(self._at([bad, 10]), 60.0, 640, 360)
+
+    def test_string_form_is_bounds_checked_too(self):
+        """"x,y" must not be a way around the check."""
+        with pytest.raises(InputError, match="outside the 640x360"):
+            InputTimeline.from_spec(self._at("700, 10"), 60.0, 640, 360)
+
+    def test_click_anchor_is_bounds_checked(self):
+        """mouse_down carries the anchor, so it matters most of all."""
+        with pytest.raises(InputError, match="outside the 640x360"):
+            InputTimeline.from_spec(
+                [{"frame": 0, "op": "mouse_down", "pos": [-3, 10]}], 60.0, 640, 360
+            )
+
+
+class TestMixedPositionUnits:
+    """One timeline, one unit.
+
+    InputState carries a single ``normalized`` flag taken from the last
+    positioned event, and mouse_vec4 applies it to the cursor and the click
+    anchor alike -- so a pixel press followed by a normalized move used to
+    rescale the already-pixel anchor by the resolution.
+    """
+
+    PIXEL_THEN_NORMALIZED = [
+        {"frame": 0, "op": "mouse_down", "pos": [320, 180]},
+        {"frame": 5, "op": "mouse_move", "pos": [0.5, 0.5], "normalized": True},
+    ]
+
+    def test_mixing_units_is_rejected(self):
+        with pytest.raises(InputError, match="pixels but input.1. gives it normalized"):
+            timeline(self.PIXEL_THEN_NORMALIZED)
+
+    def test_the_anchor_corruption_it_prevents(self):
+        """Construct the mixed state directly to show what the check averts.
+
+        The parser now refuses this, so the only way to reach the state is to
+        build the events by hand -- which pins the misbehaviour the rule exists
+        for: a press at x=320 reported to the shader as x=204800.
+        """
+        line = InputTimeline(
+            events=(
+                InputEvent(frame=0, op="mouse_down", pos=(320.0, 180.0)),
+                InputEvent(frame=5, op="mouse_move", pos=(0.5, 0.5), normalized=True),
+            )
+        )
+        _, _, z, _ = line.state_at(5).mouse_vec4(640, 360, 5)
+        assert z == 204800.0
+        with pytest.raises(InputError):
+            timeline(self.PIXEL_THEN_NORMALIZED)
+
+    def test_normalized_then_pixel_is_rejected_too(self):
+        with pytest.raises(InputError, match="One timeline must use one unit"):
+            timeline(
+                [
+                    {"frame": 0, "op": "mouse_down", "pos": [0.5, 0.5],
+                     "normalized": True},
+                    {"frame": 5, "op": "mouse_move", "pos": [320, 180]},
+                ]
+            )
+
+    def test_consistent_units_are_fine(self):
+        assert timeline(
+            [
+                {"frame": 0, "op": "mouse_down", "pos": [0.5, 0.5], "normalized": True},
+                {"frame": 5, "op": "mouse_move", "pos": [0.75, 0.5],
+                 "normalized": True},
+            ]
+        ).active
+
+    def test_positionless_ops_do_not_count_as_a_unit(self):
+        """mouse_up without a pos carries no coordinate to disagree about."""
+        assert timeline(
+            [
+                {"frame": 0, "op": "mouse_down", "pos": [0.5, 0.5], "normalized": True},
+                {"frame": 5, "op": "mouse_up"},
+                {"frame": 6, "op": "key_down", "keys": ["w"]},
+            ]
+        ).active
+
+
 class TestKeyboardEvaluation:
     def _rows(self, state: InputState):
         data = state.keyboard_bytes()

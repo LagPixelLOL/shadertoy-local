@@ -289,6 +289,24 @@ are converted with `--fps`, rounding to nearest):
 `keys` accepts names or numeric JavaScript key codes: `w`, `space`, `left`, `f1`,
 `numpad0`, `27`.
 
+**The pointer cannot leave the canvas.** On shadertoy.com the listeners are on the
+canvas element and there is no pointer capture, so an event outside it never
+fires — `iMouse` simply cannot hold an off-canvas value there. A position outside
+`0..width` / `0..height` (or `0..1` when normalized) is therefore rejected rather
+than rendered, since a shader tuned against one could not be reproduced on the
+site:
+
+```
+$ shadertoy render --input '[{"frame": 0, "op": "mouse_down", "pos": [69420, -69]}]'
+error: input[0]: pos x=69420 is outside the 640x360 canvas (0..640). The pointer
+cannot leave the canvas on shadertoy.com, so iMouse can never hold this value.
+```
+
+Negative values are doubly wrong: `iMouse.zw` encodes the button state in its
+*signs*, so a negative press position is not off-screen input, it is a corrupted
+one. A single timeline must also pick one unit — pixels or normalized — because
+the cursor and the click anchor share one scale.
+
 Operations **need not be written in temporal order** — grouping a keypress next to
 the drag it accompanies is often clearer. The list is sorted on construction, and
 sorting is *stable*, so operations sharing a frame apply in written order

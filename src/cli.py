@@ -184,6 +184,10 @@ Operations:
   "pos": [x, y]           pixels, or fractions with "normalized": true
   "keys": ["w", "space"]  names or numeric JavaScript key codes
 
+The pointer cannot leave the canvas, exactly as on shadertoy.com, so "pos" must
+lie within 0..width and 0..height (0..1 when normalized). One timeline uses one
+unit: pixels or normalized, not both.
+
 Example -- drag from the centre to the right while holding W, tap space at 1s:
 
   [
@@ -275,9 +279,15 @@ def _build_settings(args: argparse.Namespace, project: Any) -> Any:
             if precharge < 0:
                 raise ValueError(f"--precharge must be >= 0 (got {precharge})")
 
-    # Parsed after fps, since "time" in an operation is converted using it.
+    # Parsed after fps and the resolution: "time" in an operation is converted
+    # using the former, and pointer positions are bounds-checked against the
+    # latter.
     spec = getattr(args, "input_spec", None)
-    timeline = load_input_spec(spec, fps) if spec else InputTimeline.empty(fps)
+    timeline = (
+        load_input_spec(spec, fps, int(width), int(height))
+        if spec
+        else InputTimeline.empty(fps)
+    )
 
     date = DEFAULT_DATE
     if getattr(args, "date", None):

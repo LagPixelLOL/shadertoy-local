@@ -38,6 +38,7 @@ Keyboard channel
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,7 +154,29 @@ class InputEvent:
         return out
 
 
-def _parse_pos(raw: Any, where: str) -> tuple[float, float]:
+def _parse_pos(
+    raw: Any,
+    where: str,
+    *,
+    normalized: bool,
+    width: int | None,
+    height: int | None,
+) -> tuple[float, float]:
+    """Parse and bounds-check a pointer position.
+
+    The pointer is confined to the canvas. On shadertoy.com the listeners live on
+    the canvas element and there is no pointer capture, so an event outside it
+    simply never fires: ``iMouse`` cannot hold an off-canvas value there, and a
+    shader tuned against one here could not be reproduced on the site. Worse,
+    negative coordinates collide with the encoding -- ``iMouse.zw`` carries the
+    button state in its *signs*, and :meth:`InputState.mouse_vec4` takes
+    ``abs()`` of the anchor, so a negative press position is silently flipped
+    positive rather than surviving to be noticed.
+
+    Bounds are inclusive of ``width``/``height`` because the canvas spans the
+    continuous range ``[0, width]``; that also lets ``normalized`` 1.0 mean the
+    far edge rather than being off by one pixel.
+    """
     if isinstance(raw, str):
         parts = [p.strip() for p in raw.replace(";", ",").split(",")]
     elif isinstance(raw, (list, tuple)):
@@ -163,9 +186,46 @@ def _parse_pos(raw: Any, where: str) -> tuple[float, float]:
     if len(parts) != 2:
         raise InputError(f"{where}: pos needs exactly two numbers, got {raw!r}")
     try:
-        return float(parts[0]), float(parts[1])
+        pos = (float(parts[0]), float(parts[1]))
     except (TypeError, ValueError):
         raise InputError(f"{where}: pos values must be numbers, got {raw!r}") from None
+
+    for axis, value in zip("xy", pos):
+        if not math.isfinite(value):
+            raise InputError(
+                f"{where}: pos {axis} must be a finite number, got {value}"
+            )
+
+    if normalized:
+        for axis, value in zip("xy", pos):
+            if not 0.0 <= value <= 1.0:
+                raise InputError(
+                    f"{where}: normalized pos {axis}={_num(value)} is outside the "
+                    f"canvas, which is 0..1. The pointer cannot leave the canvas "
+                    f"on shadertoy.com, so iMouse can never hold this value."
+                )
+        return pos
+
+    limits = (width, height)
+    for axis, value, limit in zip("xy", pos, limits):
+        if value < 0.0 or (limit is not None and value > limit):
+            extent = "0.." + (str(limit) if limit is not None else "canvas width")
+            size = (
+                f" the {width}x{height} canvas"
+                if width is not None and height is not None
+                else " the canvas"
+            )
+            raise InputError(
+                f"{where}: pos {axis}={_num(value)} is outside{size} ({extent}). "
+                f"The pointer cannot leave the canvas on shadertoy.com, so iMouse "
+                f"can never hold this value."
+            )
+    return pos
+
+
+def _num(value: float) -> str:
+    """Render a coordinate without a pointless trailing ``.0``."""
+    return str(int(value)) if value == int(value) else str(value)
 
 
 def _parse_when(spec: dict[str, Any], fps: float, where: str) -> tuple[int, float | None]:
@@ -201,8 +261,19 @@ def _parse_when(spec: dict[str, Any], fps: float, where: str) -> tuple[int, floa
     return int(round(float(seconds) * fps)), float(seconds)
 
 
-def parse_event(spec: Any, fps: float, index: int) -> InputEvent:
-    """Validate and normalise one operation."""
+def parse_event(
+    spec: Any,
+    fps: float,
+    index: int,
+    width: int | None = None,
+    height: int | None = None,
+) -> InputEvent:
+    """Validate and normalise one operation.
+
+    *width* and *height* bound pointer positions. They are optional so the
+    module stays usable without a render target, but the CLI always supplies
+    them, which is where an off-canvas coordinate actually gets caught.
+    """
     where = f"input[{index}]"
     if not isinstance(spec, dict):
         raise InputError(f"{where}: each operation must be an object, got {type(spec).__name__}")
@@ -222,11 +293,17 @@ def parse_event(spec: Any, fps: float, index: int) -> InputEvent:
 
     frame, seconds = _parse_when(spec, fps, where)
 
+    # Read before "pos": whether a coordinate is in pixels or in fractions
+    # decides which range it is checked against.
+    normalized = bool(spec.get("normalized", False))
+
     pos = None
     if "pos" in spec:
         if op not in MOUSE_OPS:
             raise InputError(f"{where}: \"pos\" does not apply to {op}")
-        pos = _parse_pos(spec["pos"], where)
+        pos = _parse_pos(
+            spec["pos"], where, normalized=normalized, width=width, height=height
+        )
     elif op == "mouse_move":
         raise InputError(f"{where}: mouse_move needs a \"pos\"")
 
@@ -240,7 +317,6 @@ def parse_event(spec: Any, fps: float, index: int) -> InputEvent:
     elif op in KEY_OPS:
         raise InputError(f"{where}: {op} needs \"keys\"")
 
-    normalized = bool(spec.get("normalized", False))
     if normalized and pos is None:
         raise InputError(f"{where}: \"normalized\" only applies alongside \"pos\"")
 
@@ -341,7 +417,13 @@ class InputTimeline:
         return cls(events=(), fps=fps)
 
     @classmethod
-    def from_spec(cls, data: Any, fps: float = 60.0) -> "InputTimeline":
+    def from_spec(
+        cls,
+        data: Any,
+        fps: float = 60.0,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> "InputTimeline":
         """Build from a decoded JSON array of operations."""
         if data is None:
             return cls.empty(fps)
@@ -352,19 +434,28 @@ class InputTimeline:
             raise InputError(
                 f"input must be an array of operations, got {type(data).__name__}"
             )
-        events = [parse_event(spec, fps, i) for i, spec in enumerate(data)]
+        events = [
+            parse_event(spec, fps, i, width, height) for i, spec in enumerate(data)
+        ]
+        _reject_mixed_units(events)
         # __post_init__ sorts; the file order of same-frame events is preserved.
         return cls(events=tuple(events), fps=fps)
 
     @classmethod
-    def from_json(cls, text: str, fps: float = 60.0) -> "InputTimeline":
+    def from_json(
+        cls,
+        text: str,
+        fps: float = 60.0,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> "InputTimeline":
         try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
             raise InputError(
                 f"invalid input JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
             ) from exc
-        return cls.from_spec(data, fps)
+        return cls.from_spec(data, fps, width, height)
 
     @property
     def active(self) -> bool:
@@ -436,13 +527,40 @@ class InputTimeline:
         }
 
 
-def load_input_spec(source: str, fps: float = 60.0) -> InputTimeline:
+def _reject_mixed_units(events: Sequence[InputEvent]) -> None:
+    """Forbid one timeline from using both pixel and normalized positions.
+
+    :class:`InputState` carries a single ``normalized`` flag, taken from the most
+    recent positioned event, and :meth:`InputState.mouse_vec4` applies it to the
+    cursor *and* the click anchor alike. A pixel ``mouse_down`` followed by a
+    normalized ``mouse_move`` would therefore rescale the already-pixel anchor by
+    the resolution -- a press at x=320 reported as x=204800. Mixing has no use
+    that converting the coordinates does not serve, so it is rejected rather than
+    given a meaning.
+    """
+    units = {e.normalized for e in events if e.pos is not None}
+    if len(units) > 1:
+        first_norm = next(i for i, e in enumerate(events) if e.pos and e.normalized)
+        first_px = next(i for i, e in enumerate(events) if e.pos and not e.normalized)
+        raise InputError(
+            f"input[{first_px}] gives pos in pixels but input[{first_norm}] gives it "
+            f"normalized. One timeline must use one unit: the click anchor and the "
+            f"cursor share a single scale, so mixing them would rescale the anchor."
+        )
+
+
+def load_input_spec(
+    source: str,
+    fps: float = 60.0,
+    width: int | None = None,
+    height: int | None = None,
+) -> InputTimeline:
     """Load a timeline from inline JSON, a file path, or ``-`` for stdin."""
     text = source.strip()
     if text == "-":
-        return InputTimeline.from_json(sys.stdin.read(), fps)
+        return InputTimeline.from_json(sys.stdin.read(), fps, width, height)
     if text.startswith("[") or text.startswith("{"):
-        return InputTimeline.from_json(text, fps)
+        return InputTimeline.from_json(text, fps, width, height)
     path = Path(source).expanduser()
     if not path.is_file():
         raise InputError(
@@ -450,6 +568,8 @@ def load_input_spec(source: str, fps: float = 60.0) -> InputTimeline:
             f"nor an existing file"
         )
     try:
-        return InputTimeline.from_json(path.read_text(encoding="utf-8"), fps)
+        return InputTimeline.from_json(
+            path.read_text(encoding="utf-8"), fps, width, height
+        )
     except UnicodeDecodeError as exc:
         raise InputError(f"{path} is not valid UTF-8: {exc}") from exc

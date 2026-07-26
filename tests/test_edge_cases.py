@@ -293,13 +293,32 @@ class TestTimelineEdges:
         )
         assert line.events[0].keys == (65,)
 
-    def test_normalized_positions_outside_zero_one(self):
-        """Off-screen coordinates are legal; shaders may rely on them."""
+    def test_normalized_positions_outside_zero_one_are_rejected(self):
+        """Off-canvas input is unreachable on shadertoy.com, so it is refused.
+
+        This deliberately reverses an earlier decision to allow it. A shader
+        cannot observe an off-canvas iMouse on the real site -- the canvas
+        listeners never fire outside it -- so any local behaviour depending on
+        one is unreproducible, which is the failure mode this tool exists to
+        catch rather than to offer.
+        """
+        with pytest.raises(InputError, match="outside the canvas"):
+            InputTimeline.from_spec(
+                [{"frame": 0, "op": "mouse_move", "pos": [1.5, 0.25],
+                  "normalized": True}]
+            )
+        with pytest.raises(InputError, match="outside the canvas"):
+            InputTimeline.from_spec(
+                [{"frame": 0, "op": "mouse_move", "pos": [0.5, -0.25],
+                  "normalized": True}]
+            )
+
+    def test_normalized_edges_are_inclusive(self):
+        """0 and 1 are the canvas edges, not off it."""
         line = InputTimeline.from_spec(
-            [{"frame": 0, "op": "mouse_move", "pos": [1.5, -0.25], "normalized": True}]
+            [{"frame": 0, "op": "mouse_move", "pos": [0.0, 1.0], "normalized": True}]
         )
-        x, y, _, _ = line.state_at(0).mouse_vec4(640, 360, 0)
-        assert (x, y) == (960.0, -90.0)
+        assert line.state_at(0).mouse_vec4(640, 360, 0)[:2] == (0.0, 360.0)
 
     def test_pos_as_string_is_accepted(self):
         line = InputTimeline.from_spec(
