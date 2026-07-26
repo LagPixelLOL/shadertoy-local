@@ -409,6 +409,19 @@ class Renderer:
         self, rp: _Pass, frame: int, state: InputState
     ) -> list[tuple[int, int, int]]:
         """Bind this pass's channels; returns per-channel (w, h, depth)."""
+        # Unbind any sampler objects a previous pass left on these units.
+        # Buffer channels bind through sampler objects (below), and a sampler
+        # bound to a unit *overrides* the texture object's own filter and
+        # wrap. A plain texture.use() does not clear it, so without this a
+        # texture channel inherits whatever sampler the previous pass used on
+        # the same unit -- e.g. a noise tile configured linear/repeat being
+        # read nearest/clamp because the temporal-filter pass reads its
+        # feedback buffer that way. Clamp on a tile that is deliberately
+        # addressed far outside [0,1] returns the edge texel for whole swathes
+        # of the domain, which silently deletes noise octaves; it broke the
+        # volumetric example in exactly that way and is invisible in a
+        # single-pass project, which is what made it hard to find.
+        self.ctx.clear_samplers(0, 4)
         resolutions = [(0, 0, 0)] * 4
         for index in range(4):
             binding = rp.spec.channels.get(index)

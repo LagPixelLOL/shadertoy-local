@@ -463,6 +463,7 @@ class TestExamples:
             "05-interactive",
             "06-portable-common",
             "07-path-traced-box",
+            "08-cumulonimbus",
         ],
     )
     def test_example_renders(self, name, gl_context):
@@ -587,6 +588,81 @@ class TestBufferFiltering:
         """Without mipmaps a high LOD clamps to level 0, proving the previous
         test is actually measuring the pyramid rather than base-level sampling."""
         assert self._high_lod(make_project, gl_context, "linear") == pytest.approx(0.0)
+
+
+class TestSamplerIsolation:
+    """A sampler object bound for one pass must not leak onto the next.
+
+    Buffer channels bind through GL sampler objects, and a sampler bound to a
+    texture unit *overrides* the texture object's own filter and wrap. A plain
+    texture bind does not clear it, so without explicit unbinding a texture
+    channel inherits whatever sampler the previously rendered pass used on the
+    same unit. The failure needs two passes and two frames to appear -- pass
+    order within the first frame is buffer_a first, so frame 0 is always
+    correct -- which is exactly why it survived a suite full of single-pass
+    and single-frame sampler tests: it broke the volumetric example's noise
+    tile (linear/repeat read as nearest/clamp) while every targeted test
+    passed.
+    """
+
+    # Samples the uv builtin outside [0,1]: repeat wraps 1.375 to 0.375, while
+    # a leaked clamp sampler pins it to the edge texel at 1.0.
+    TAP = (
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    fragColor = texture(iChannel0, vec2(1.375));\n"
+        "}\n"
+    )
+    SHOW = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = texture(iChannel0, f/iResolution.xy);\n"
+        "}\n"
+    )
+
+    def test_texture_wrap_survives_a_buffer_sampler_on_the_same_unit(
+        self, make_project, gl_context
+    ):
+        root = make_project(
+            {"buffer_a.glsl": self.TAP, "image.glsl": self.SHOW},
+            config={
+                "buffer_a": {
+                    "channels": {
+                        "0": {
+                            "type": "builtin",
+                            "source": "uv",
+                            "filter": "linear",
+                            "wrap": "repeat",
+                        }
+                    }
+                },
+                # nearest + clamp (the buffer default): the exact sampler that,
+                # left bound to unit 0, corrupts the builtin above on frame 1.
+                "image": {
+                    "channels": {
+                        "0": {
+                            "type": "buffer",
+                            "source": "buffer_a",
+                            "filter": "nearest",
+                        }
+                    }
+                },
+            },
+        )
+        project = load_project(root)
+        renderer = Renderer(
+            project, gl_context.ctx, RenderSettings(width=16, height=16, frame=1)
+        )
+        try:
+            renderer.compile()
+            values = {
+                cap.frame: float(cap.images["buffer_a"][8, 8, 0])
+                for cap in renderer.run(range(2))
+            }
+        finally:
+            renderer.release()
+        assert values[0] == pytest.approx(0.375, abs=0.01)
+        assert values[1] == pytest.approx(values[0], abs=0.01), (
+            "frame 1 read the builtin through the image pass's stale sampler"
+        )
 
 
 class TestPrecharge:
