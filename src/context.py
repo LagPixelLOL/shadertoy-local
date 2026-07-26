@@ -255,7 +255,7 @@ def _egl_setup_hint() -> str:
     if _load_egl() is None:
         problems.append(
             "libEGL.so.1 is missing (the GLVND dispatch library).\n"
-            "  Debian/Ubuntu: apt-get install -y --no-install-recommends libegl1"
+            "  Debian/Ubuntu: apt-get install -y libegl1"
         )
     vendor_dir = "/usr/share/glvnd/egl_vendor.d"
     if os.path.isdir(vendor_dir):

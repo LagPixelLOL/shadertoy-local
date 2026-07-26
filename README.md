@@ -476,7 +476,7 @@ If EGL setup is incomplete the error explains the fix; on Debian/Ubuntu with
 NVIDIA that is usually:
 
 ```bash
-apt-get install -y --no-install-recommends libegl1
+apt-get install -y libegl1
 # and a GLVND vendor config so EGL can see the NVIDIA driver:
 echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
   > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
