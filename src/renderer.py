@@ -118,6 +118,70 @@ class FrameCapture:
     duration_ms: float = 0.0
 
 
+@dataclass
+class RunTiming:
+    """Timing for a whole :meth:`Renderer.run`, in milliseconds.
+
+    A total on its own is uninformative: it just grows with the frame count. The
+    number that says something about the shader is the per-frame cost, so that
+    is what the summary leads with. Warm-up frames are tracked separately
+    because they are rendered but never captured -- omitting them would make the
+    total disagree with the wall clock by a wide margin on feedback shaders.
+    """
+
+    #: Per-frame durations of frames that were captured.
+    captured_ms: list[float] = field(default_factory=list)
+    #: Per-frame durations of frames rendered only to advance the simulation.
+    warmup_ms: list[float] = field(default_factory=list)
+
+    @property
+    def frames(self) -> int:
+        """Frames actually rendered, warm-up included."""
+        return len(self.captured_ms) + len(self.warmup_ms)
+
+    @property
+    def captured(self) -> int:
+        return len(self.captured_ms)
+
+    @property
+    def warmup_frames(self) -> int:
+        return len(self.warmup_ms)
+
+    @property
+    def warmup_total_ms(self) -> float:
+        return sum(self.warmup_ms)
+
+    @property
+    def total_ms(self) -> float:
+        """Every rendered frame, so this tracks the wall clock."""
+        return sum(self.captured_ms) + sum(self.warmup_ms)
+
+    @property
+    def mean_ms(self) -> float:
+        """Mean cost of a captured frame -- the figure worth comparing."""
+        return sum(self.captured_ms) / len(self.captured_ms) if self.captured_ms else 0.0
+
+    @property
+    def min_ms(self) -> float:
+        return min(self.captured_ms, default=0.0)
+
+    @property
+    def max_ms(self) -> float:
+        return max(self.captured_ms, default=0.0)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "frames_rendered": self.frames,
+            "frames_captured": self.captured,
+            "warmup_frames": self.warmup_frames,
+            "warmup_ms": round(self.warmup_total_ms, 4),
+            "total_ms": round(self.total_ms, 4),
+            "mean_ms": round(self.mean_ms, 4),
+            "min_ms": round(self.min_ms, 4),
+            "max_ms": round(self.max_ms, 4),
+        }
+
+
 class _Target:
     """A render target; buffer passes get two for ping-ponging."""
 
@@ -243,6 +307,8 @@ class Renderer:
         #: Sampler objects keyed by (filter, wrap), shared across passes.
         self._samplers: dict[tuple[str, str], Any] = {}
         self._compiled = False
+        #: Timing for the most recent :meth:`run`; replaced on each call.
+        self.timing = RunTiming()
 
     # -- compilation -----------------------------------------------------
 
@@ -411,6 +477,7 @@ class Renderer:
         if not self.passes:
             raise RenderError("no passes compiled; call compile() first")
 
+        self.timing = RunTiming()
         wanted = sorted(set(capture if capture is not None else [self.settings.frame]))
         if not wanted:
             return
@@ -488,6 +555,7 @@ class Renderer:
             duration_ms = (time.perf_counter() - start) * 1000.0
 
             if frame in wanted_set:
+                self.timing.captured_ms.append(duration_ms)
                 images = {
                     name: rp.target.read_array()
                     for name, rp in self.passes.items()
@@ -496,6 +564,10 @@ class Renderer:
                 yield FrameCapture(
                     frame=frame, time=now, images=images, duration_ms=duration_ms
                 )
+            else:
+                # Rendered purely to advance feedback state, or skipped over by
+                # --every. Still real GPU work, so it must not vanish.
+                self.timing.warmup_ms.append(duration_ms)
 
     def render_frame(self, frame: int | None = None) -> FrameCapture:
         """Render and return a single frame."""

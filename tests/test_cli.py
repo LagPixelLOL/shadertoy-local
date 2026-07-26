@@ -15,8 +15,10 @@ from shadertoy_local.cli import (
     EXIT_FAILED,
     EXIT_OK,
     EXIT_USAGE,
+    _timing_lines,
     main,
 )
+from shadertoy_local.renderer import RunTiming
 
 BROKEN = "void mainImage(out vec4 c, in vec2 f){ c = does_not_exist; }\n"
 BLACK = "void mainImage(out vec4 c, in vec2 f){ c = vec4(0.0,0.0,0.0,1.0); }\n"
@@ -133,6 +135,42 @@ class TestCheck:
         code, payload, err = run(capsys, "check", "-C", str(root), "--json")
         assert payload is not None, "stdout must be valid JSON"
         assert "image.glsl" in err
+
+
+class TestTimingSummary:
+    """The reported cost must be per-frame and must not hide warm-up work."""
+
+    def test_single_frame_is_a_bare_number(self):
+        timing = RunTiming(captured_ms=[0.705])
+        assert _timing_lines(timing) == ["  gpu time 0.705 ms"]
+
+    def test_many_frames_lead_with_the_per_frame_cost(self):
+        timing = RunTiming(captured_ms=[1.0, 2.0, 3.0])
+        (line,) = _timing_lines(timing)
+        # 2.000 ms/frame says something about the shader; 6.000 ms only says
+        # "three frames were asked for".
+        assert line.startswith("  gpu time 2.000 ms/frame")
+        assert "min 1.000, max 3.000" in line
+        assert "x 3 = 6.000 ms" in line
+
+    def test_warmup_frames_are_reported_not_dropped(self):
+        timing = RunTiming(captured_ms=[1.0, 3.0], warmup_ms=[5.0] * 10)
+        head, tail = _timing_lines(timing)
+        assert "x 2 = 4.000 ms" in head
+        assert "plus 10 uncaptured frame(s) 50.000 ms" in tail
+        assert "54.000 ms for all 12 rendered" in tail
+
+    def test_nothing_rendered_says_nothing(self):
+        assert _timing_lines(RunTiming()) == []
+
+    def test_totals_cover_every_rendered_frame(self):
+        timing = RunTiming(captured_ms=[1.0], warmup_ms=[2.0, 4.0])
+        assert timing.frames == 3
+        assert timing.total_ms == 7.0
+        # The mean describes captured frames only: warm-up frames of a feedback
+        # shader are not the thing being measured.
+        assert timing.mean_ms == 1.0
+        assert timing.to_dict()["frames_rendered"] == 3
 
 
 @pytest.mark.gpu

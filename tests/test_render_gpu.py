@@ -360,6 +360,29 @@ class TestBufferSemantics:
             renderer.release()
         assert values == {0: 1.0, 1: 2.0, 2: 3.0, 3: 4.0, 4: 5.0, 5: 6.0}
 
+    def test_timing_counts_warmup_frames(self, make_project, gl_context):
+        """Frames rendered only to warm the feedback buffer still cost GPU time.
+
+        Summing the captured frames alone would report ~1 frame of work for a
+        run that actually rendered 6, which is the number a user would then
+        wrongly quote as the shader's cost.
+        """
+        project = load_project(self._project(make_project))
+        renderer = Renderer(
+            project, gl_context.ctx, RenderSettings(width=16, height=16, frame=5)
+        )
+        try:
+            renderer.compile()
+            captures = list(renderer.run([5]))
+            timing = renderer.timing
+        finally:
+            renderer.release()
+        assert len(captures) == 1
+        assert timing.captured == 1
+        assert timing.warmup_frames == 5
+        assert timing.frames == 6
+        assert timing.total_ms > timing.mean_ms
+
     def test_image_sees_current_frame_of_other_buffer(
         self, make_project, gl_context
     ):

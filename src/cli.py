@@ -355,6 +355,37 @@ def _resolve_capture(args: argparse.Namespace, start: int) -> list[int]:
     return [start + index * step for index in range(count)]
 
 
+def _timing_lines(timing: Any) -> list[str]:
+    """Human summary of a :class:`~.renderer.RunTiming`.
+
+    Leads with the per-frame cost rather than the total: a bare total only tells
+    you how many frames you asked for, whereas the per-frame figure is what
+    changes when the shader does. The total is still shown, alongside the
+    warm-up work that a naive sum over captured frames would hide.
+    """
+    if timing.frames == 0:
+        return []
+
+    lines: list[str] = []
+    if timing.captured == 1:
+        head = f"  gpu time {timing.mean_ms:.3f} ms"
+    else:
+        head = (
+            f"  gpu time {timing.mean_ms:.3f} ms/frame "
+            f"(min {timing.min_ms:.3f}, max {timing.max_ms:.3f}) "
+            f"x {timing.captured} = {timing.total_ms - timing.warmup_total_ms:.3f} ms"
+        )
+    lines.append(head)
+
+    if timing.warmup_frames:
+        lines.append(
+            f"  plus {timing.warmup_frames} uncaptured frame(s) "
+            f"{timing.warmup_total_ms:.3f} ms; "
+            f"{timing.total_ms:.3f} ms for all {timing.frames} rendered"
+        )
+    return lines
+
+
 # --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
@@ -755,7 +786,7 @@ def cmd_render(args: argparse.Namespace) -> int:
                 entry["passes"][name] = item
             results.append(entry)
 
-        total_ms = sum(r["duration_ms"] for r in results)
+        timing = renderer.timing
         report.say(
             f"rendered {len(results)} frame(s) at {settings.width}x{settings.height} "
             f"on {handle.ctx.info['GL_RENDERER']}"
@@ -789,7 +820,8 @@ def cmd_render(args: argparse.Namespace) -> int:
                             report.say(line)
                         else:
                             report.warn(line)
-        report.say(f"  total gpu time {total_ms:.3f} ms")
+        for line in _timing_lines(timing):
+            report.say(line)
 
         ok = failures == 0
         report.emit(
@@ -799,6 +831,7 @@ def cmd_render(args: argparse.Namespace) -> int:
                 "renderer": handle.to_dict(),
                 "output_dir": str(outdir),
                 "frames": results,
+                "timing": timing.to_dict(),
                 "probe_failures": failures,
             }
         )

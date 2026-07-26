@@ -230,6 +230,22 @@ drawn. `--every 200` then costs no more than `--every 20`. There is a test
 asserting the skipped and unskipped results are byte-identical, which is what
 makes the optimisation safe.
 
+Because of that, `render` reports timing **per frame** and counts the frames you
+never see, rather than summing the captures alone:
+
+```
+$ shadertoy render --frame 1000 --count 10 --every 100
+rendered 10 frame(s) at 640x360 on NVIDIA RTX PRO 6000 Blackwell ...
+  gpu time 0.699 ms/frame (min 0.675, max 0.735) x 10 = 6.995 ms
+  plus 1891 uncaptured frame(s) 1335.699 ms; 1342.694 ms for all 1901 rendered
+```
+
+The per-frame figure is the one that says something about the shader; a total on
+its own only restates `--count`. The second line appears when warm-up or
+skipped-over frames were drawn, so the reported cost cannot quietly disagree with
+the wall clock by two orders of magnitude. `--json` carries the same numbers under
+`timing`.
+
 ## Simulated input
 
 No window and no real devices: input is a **single timeline of operations**
@@ -548,7 +564,7 @@ pytest                    # everything
 pytest -m "not gpu"       # logic only, no GPU needed
 ```
 
-The suite is split by marker: ~180 tests are pure logic, the rest are marked
+The suite is split by marker: most tests are pure logic, the rest are marked
 `gpu` (skipped when no device is available) or `cpu` (skipped when no software
 rasterizer is available). The `cpu` set is a deliberate subset — enough to cover
 the GPU-less path and, more usefully, to check the diagnostic parser against a
