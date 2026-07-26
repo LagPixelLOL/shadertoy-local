@@ -171,14 +171,34 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
         vec3 roC, rdC;
         cameraRay(iResolution.xy * 0.5, iResolution, ang, roC, rdC);
+        // The exponent softens the factor and the clamp floors it: by day
+        // the shaded side of even a dead-backlit crown is bathed in blue
+        // skylight from the open hemisphere around it, and letting the
+        // refill fall to nothing rendered a noon shadow as if the air had
+        // been removed. The floor is what keeps daytime shade luminous; at
+        // night it costs nothing, because it multiplies a skylight that has
+        // already dimmed with the source.
         float gNow = 0.5 + 0.5 * dot(sd, -rdC);
         float gKey = 0.5 + 0.5 * dot(keySunDirection(), -rdC);
-        refill *= clamp(pow(max(gNow, 1e-3) / gKey, 0.6), 0.0, 1.2);
+        refill *= clamp(pow(max(gNow, 1e-3) / gKey, 0.45), 0.30, 1.2);
         vec3 skyLight = mix(skyRadiance(vec3(0.0, 1.0, 0.0), sd),
                             skyRadiance(normalize(vec3(sd.x, 0.22, sd.z)), sd),
                             0.15) * 3.8;
         vec3 haze = skyRadiance(rd, sd);
         float mu = dot(rd, sd);
+
+        // Skylight from behind the camera. The ambient march measures
+        // occlusion straight up, which is right for a point buried under
+        // cloud and wrong for the one kind of point that fills a backlit
+        // frame: a wall facing the viewer. That wall sees the half of the
+        // sky the camera stands in, and nothing occludes it -- if anything
+        // did, the wall would not be visible. Modelled as one sky sample
+        // toward the camera's half of the dome, attenuated per-sample by
+        // the transmittance the view ray has already accumulated, which is
+        // exactly the shadowing of light arriving from the camera's side.
+        // Without it, a midday crown with the sun behind it rendered black,
+        // as if the shaded side hung in a sky-less vacuum (reported).
+        vec3 backFill = skyRadiance(normalize(vec3(0.0, 0.40, -0.92)), sd) * 1.2;
 
         // Where the ray starts inside the box. Offsetting it by a per-pixel,
         // per-frame low-discrepancy value is what trades banding for noise --
@@ -254,7 +274,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 }
 
                 vec3 source = sunScatter(opticalDepth, mu, sunCol) +
-                              ambientScatter(skyLight, skyDepth, opticalDepth, refill);
+                              ambientScatter(skyLight, skyDepth, opticalDepth, refill) +
+                              backFill * transmittance;
                 source *= ALBEDO;
 
                 // Energy-conserving integration of the segment. Analytically

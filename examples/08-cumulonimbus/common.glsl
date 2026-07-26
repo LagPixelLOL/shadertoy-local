@@ -782,6 +782,19 @@ vec3 sunScatter(float opticalDepth, float mu, vec3 sunCol) {
         b *= MS_FALLOFF;    // contribution
         c *= 0.60;          // eccentricity: deeper orders are more isotropic
     }
+
+    // The aureole. Similarity theory's other half: photons scattered only
+    // into the forward lobe barely deviate, so that fraction of the beam
+    // propagates almost undeflected under a *reduced* extinction, about
+    // (1 - g) of the true one. The ladder above starts too steep to carry
+    // it -- through three hundred metres of rim (od ~ 7) its first order is
+    // gone and the deeper ones are too isotropic to blaze -- so with the
+    // sun just behind the crown's edge the disc cut off as if by a wall,
+    // where the photograph shows it smearing through as a bright glow. One
+    // extra term with the forward extinction and a tight lobe restores it;
+    // at od 40, deep in the core, it is exp(-7) of itself and gone, and at
+    // any lateral sun the phase leaves nothing to see.
+    l += 0.30 * exp(-0.18 * opticalDepth) * cloudPhase(mu, 0.92);
     return l * sunCol;
 }
 
@@ -842,7 +855,7 @@ vec3 ambientScatter(vec3 skyLight, float skyOD, float sunOD, float refill) {
     // sun's, and a low red sun then renders with midday's gentle shading
     // instead of the near-chiaroscuro a four-degree sun actually produces.
     // (That was visible, and reported, before it was explained.)
-    float f = 0.62 * refill;
+    float f = 0.50 * refill;
     return amb * (f + (1.0 - f) / (1.0 + skyOD * 0.36));
 }
 
