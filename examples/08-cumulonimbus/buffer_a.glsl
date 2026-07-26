@@ -185,6 +185,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         float gNow = 0.5 + 0.5 * dot(sd, -rdC);
         float gKey = 0.5 + 0.5 * dot(keySunDirection(), -rdC);
         refill *= clamp(pow(max(gNow, 1e-3) / gKey, 0.45), 0.30, 1.2);
+
+        // How much of the fine erosion the *lighting geometry* lets anyone
+        // see. A frontlit cloud really does look like a stack of smooth
+        // lobes: with the light near the view axis every bump's shadow
+        // hides behind the bump, and what a photograph records of the
+        // relief is nearly nothing. This renderer betrays the relief
+        // anyway, through opacity edges and ambient variation, and with the
+        // sun steered behind the camera the crown read as harshly
+        // over-detailed -- crunchier than any photograph of a frontlit
+        // cloud. One factor for the whole frame, from the centre ray --
+        // computing it per pixel puts a detail gradient across the frame --
+        // and normalised against the calibration geometry, so the
+        // reference frame keeps every bit of the detail it was matched
+        // with.
+        float wNow = mix(0.30, 1.0, smoothstep(-0.85, 0.05, dot(rdC, sd)));
+        float wKey = mix(0.30, 1.0,
+                         smoothstep(-0.85, 0.05, dot(rdC, keySunDirection())));
+        float detailFade = clamp(wNow / wKey, 0.25, 1.0);
         vec3 skyLight = mix(skyRadiance(vec3(0.0, 1.0, 0.0), sd),
                             skyRadiance(normalize(vec3(sd.x, 0.22, sd.z)), sd),
                             0.15) * 3.8;
@@ -265,8 +283,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             // Fade the fine erosion out as the step outgrows it. Detail smaller
             // than the step cannot be integrated, only aliased, and the
             // temporal filter will happily average aliasing into a stable,
-            // permanent artefact.
-            float detail = clamp(1.0 - (ds - 0.025) / 0.10, 0.0, 1.0);
+            // permanent artefact. detailFade is the geometric term: see
+            // where it is computed above the march.
+            float detail = clamp(1.0 - (ds - 0.025) / 0.10, 0.0, 1.0) *
+                           detailFade;
             float density = cloudDensity(iChannel0, p, iTime, sdf, 3, detail);
 
             if (density > 0.001) {

@@ -31,6 +31,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     vec4 cloud = texture(iChannel0, fragCoord / iResolution.xy);
 
+    // Scotopic acuity. Rod vision does not just lose colour, it loses
+    // resolution -- an order of magnitude fewer receptive fields than the
+    // fovea's cones -- and a moonlit cloud looks *soft*, not merely dim: a
+    // night render with daylight sharpness reads as a grey day photo. Four
+    // wide taps blended in by the same night factor as the Purkinje shift.
+    float night = nightness();
+    if (night > 0.0) {
+        vec2 px = 1.6 / iResolution.xy;
+        vec2 uvc = fragCoord / iResolution.xy;
+        vec4 soft = 0.25 * (texture(iChannel0, uvc + vec2( px.x,  px.y)) +
+                            texture(iChannel0, uvc + vec2(-px.x,  px.y)) +
+                            texture(iChannel0, uvc + vec2( px.x, -px.y)) +
+                            texture(iChannel0, uvc + vec2(-px.x, -px.y)));
+        cloud = mix(cloud, soft, 0.85 * night);
+    }
+
     // Everything behind the storm: sky, and the sun if it is in this pixel. The
     // cloud's own transmittance is what hides it, which is why the disc dims
     // and reddens as an anvil edge drifts across it without any special case.
@@ -93,7 +109,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // monochrome before the tone curve ever sees it.
     vec3 roC, rdC;
     cameraRay(iResolution.xy * 0.5, iResolution, ang, roC, rdC);
-    float night = nightness();
     if (night > 0.0) {
         float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
         col = mix(col, l * vec3(0.62, 0.90, 1.45), 0.85 * night);
