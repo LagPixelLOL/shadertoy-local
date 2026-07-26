@@ -244,7 +244,9 @@ class ChannelTextures:
             self._keyboard = self.ctx.texture(
                 (KEYBOARD_WIDTH, KEYBOARD_HEIGHT), 1, dtype="f1"
             )
-            self._keyboard.filter = (self.ctx.NEAREST, self.ctx.NEAREST)
+            # Linear, matching the site's default; the binding below normally
+            # overrides this anyway.
+            self._keyboard.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
             self._keyboard.repeat_x = False
             self._keyboard.repeat_y = False
             self._owned.append(self._keyboard)

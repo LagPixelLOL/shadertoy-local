@@ -86,7 +86,7 @@ Shadertoy lacks.
 | `buffer` | `buffer_a`..`buffer_d` | Defaults to `linear`/`clamp` — matching shadertoy.com. Settings are per *buffer*, see below |
 | `texture` | path relative to project root | Any format Pillow reads |
 | `builtin` | see below | Procedural, needs no asset files |
-| `keyboard` | *(none needed)* | 256x3 key state texture. Filter `nearest` (default) or `linear` only, wrap is always `clamp` — matching the site's dialog |
+| `keyboard` | *(none needed)* | 256x3 key state texture. Filter `linear` (default) or `nearest` only, wrap is always `clamp` — matching the site's dialog |
 
 Builtin textures are procedurally generated and deterministic (fixed seed), so
 golden tests stay stable. They fall into two groups, and the distinction matters

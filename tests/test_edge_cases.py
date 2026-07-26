@@ -1454,14 +1454,16 @@ class TestKeyboardChannelOptions:
         binding = load_project(root).passes["image"].channels[0]
         assert binding.filter == "linear"
 
-    def test_defaults_are_nearest_and_clamp(self, make_project):
-        """Nearest, not the generic linear default: a key-state lookup wants
-        exact texels, and this runtime has always sampled it nearest."""
+    def test_defaults_are_linear_and_clamp(self, make_project):
+        """Linear because that is the site's default (checked there). This
+        runtime used to hardcode nearest regardless of the config, so texture()
+        readers of the keyboard get a genuine fix here; texelFetch readers --
+        every example, and almost every real shader -- never notice."""
         root = make_project(
             {"image.glsl": self.IMAGE}, config=self._config({"type": "keyboard"})
         )
         binding = load_project(root).passes["image"].channels[0]
-        assert binding.filter == "nearest"
+        assert binding.filter == "linear"
         assert binding.wrap == "clamp"
         assert binding.vflip is False
 

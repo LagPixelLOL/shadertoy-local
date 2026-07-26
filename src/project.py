@@ -622,9 +622,11 @@ def _parse_channel(
         # only -- there is no mipmap entry in its dialog -- and its wrap is
         # fixed at clamp. There is also nothing meaningful to flip: the three
         # rows are addressed by texelFetch row index, and a silently ignored
-        # vflip would be the usual worst outcome. The filter defaults to
-        # nearest, which is what a key-state lookup wants and what this
-        # runtime always did.
+        # vflip would be the usual worst outcome. The filter default stays
+        # the generic linear, because that is the site's default too
+        # (checked there); nearest would arguably suit a key-state lookup
+        # better, but texelFetch readers never notice and a texture() reader
+        # tuned against one default would render differently on the other.
         if binding.filter == "mipmap":
             raise ProjectError(
                 f'{where}: filter "mipmap" is not supported for the keyboard; '
@@ -640,8 +642,6 @@ def _parse_channel(
             raise ProjectError(
                 f'{where}: "vflip" is not supported for keyboard channels'
             )
-        if "filter" not in spec:
-            binding.filter = "nearest"
         binding.wrap = "clamp"
         binding.vflip = False
     elif binding.is_builtin:
