@@ -1,6 +1,6 @@
 {
   "name": "cumulonimbus",
-  "description": "The boiling crown of a cumulonimbus under a low sun: a jittered volumetric march through a domain-folded fBm erosion field in Buffer A, resolved by an exact rotation-reprojected 16-frame temporal filter in Buffer B.",
+  "description": "The boiling crown of a cumulonimbus: a jittered volumetric march through a domain-folded fBm erosion field in Buffer A, resolved by an exact rotation-reprojected 16-frame temporal filter in Buffer B. Drag the mouse to steer the sun (x azimuth, y elevation); press S to swap it for a full moon.",
   "defaults": {
     "width": 640,
     "height": 360,
@@ -13,6 +13,9 @@
         "source": "rgba-noise-medium",
         "filter": "linear",
         "wrap": "repeat"
+      },
+      "1": {
+        "type": "keyboard"
       }
     }
   },
@@ -39,6 +42,9 @@
         "source": "buffer_b",
         "filter": "linear",
         "wrap": "clamp"
+      },
+      "1": {
+        "type": "keyboard"
       }
     }
   }

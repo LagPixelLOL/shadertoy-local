@@ -25,22 +25,18 @@ const float PI = 3.14159265359;
 
 // ---- daylight -------------------------------------------------------------
 //
-// The sun is the only light in the scene and its direction is fixed for now, so
-// a frame is a function of the frame index alone and the temporal filter in
-// Buffer B never has to reconverge on a lighting change.
+// The sun is the only light in the scene, and it is steerable: drag the
+// mouse to place it, press S to swap it for a full moon (see the
+// interactive-lighting block below). With no input it sits at the
+// calibration position, so a frame is a function of the frame index alone
+// and the temporal filter in Buffer B never has to reconverge.
 //
-// It is still plumbed as a variable everywhere downstream -- the sky, the light
-// march, the phase function, the aerial perspective and the shafts all read it,
-// none of them assume it is constant -- so making it dynamic is a change to
-// this one function:
-//
-//     float az = SUN_AZIMUTH + 0.05 * time;
-//     float el = SUN_ELEVATION + 0.30 * sin(0.09 * time);
-//
-// Every caller already passes iTime in. Two things will want attention when
-// that happens: EXPOSURE has to follow the sun's elevation, because the scene
-// spans several stops between noon and dusk, and Buffer B's blend weight has to
-// rise or the history will smear the old lighting across the new.
+// When the light does move, everything follows: the sky, the disc, the
+// light march, the phase function and the shafts all take the direction as
+// a variable, the exposure meter in sceneExposure re-exposes the frame for
+// wherever the sun lands, and Buffer B's variance clip is what keeps the
+// history from smearing the old lighting across the new -- a lighting
+// change converges in the filter's sixteen-frame window.
 //
 // Low, to the left, and behind the camera's shoulder. That is the whole
 // lighting design, and each of the three matters:
@@ -67,12 +63,41 @@ const float PI = 3.14159265359;
 const float SUN_AZIMUTH   = -1.80;   // radians from +z, the direction of travel
 const float SUN_ELEVATION =  0.26;   // radians above the horizontal
 
-// Radiance of the solar disc before atmospheric extinction reddens it.
-const vec3 SUN_RADIANCE = vec3(1.00, 0.98, 0.95) * 22.0;
+// Radiance of the solar disc before atmospheric extinction reddens it, and
+// what a full moon delivers on the same scale. The real ratio is about
+// nineteen stops; this one is picked so that the night render sits where the
+// partial exposure compensation in sceneExposure wants it.
+const vec3  SUN_RADIANCE  = vec3(1.00, 0.98, 0.95) * 22.0;
+const float MOON_FRACTION = 1.0 / 22.0;
+
+// ---- interactive lighting ---------------------------------------------------
+//
+// The live lighting state. Globals rather than more constants, because the
+// sun is steerable: drag the mouse to place it (x is azimuth, a full turn
+// across the frame; y is elevation, horizon to near-zenith) and tap S to
+// swap the sun for a full moon. Every function below reads these, so the
+// whole pipeline -- sky, disc, light march, exposure meter, Purkinje shift --
+// follows the light with no further plumbing.
+//
+// Each pass assigns them at the top of its mainImage through setupLighting,
+// passing its own uniforms in; the defaults reproduce the calibration frame
+// byte-for-byte when the mouse has never been touched and S never pressed.
+// (Common cannot read iMouse itself: see examples/06-portable-common.)
+float g_sunAzimuth   = SUN_AZIMUTH;
+float g_sunElevation = SUN_ELEVATION;
+vec3  g_sunRadiance  = SUN_RADIANCE;
+
+void setupLighting(vec4 mouse, vec3 res, float moonToggle) {
+    if (max(mouse.x, mouse.y) > 0.5) {
+        g_sunAzimuth   = mix(-PI, PI, clamp(mouse.x / res.x, 0.0, 1.0));
+        g_sunElevation = mix(0.02, 1.35, clamp(mouse.y / res.y, 0.0, 1.0));
+    }
+    g_sunRadiance = SUN_RADIANCE * mix(1.0, MOON_FRACTION, moonToggle);
+}
 
 vec3 sunDirection(float time) {
-    float az = SUN_AZIMUTH;
-    float el = SUN_ELEVATION;
+    float az = g_sunAzimuth;
+    float el = g_sunElevation;
     return vec3(sin(az) * cos(el), sin(el), cos(az) * cos(el));
 }
 
@@ -674,7 +699,7 @@ vec3 skyRadiance(vec3 rd, vec3 sd) {
     // the beam that ends up coming at the camera.
     vec3 j = (BETA_R * H_R * phaseR + vec3(BETA_M * H_M * phaseM)) / ZENITH_OD;
 
-    vec3 col = SUN_RADIANCE * sunTransmittance(sd) * j * view;
+    vec3 col = g_sunRadiance * sunTransmittance(sd) * j * view;
 
     // Second order. Single scattering alone cannot
     // keep a low sun's sky blue and it is worth being precise about why: the
@@ -716,7 +741,7 @@ vec3 skyRadiance(vec3 rd, vec3 sd) {
     // the solar elevation until the sun is actually setting; the constant in
     // front keeps the product at the calibration elevation what the linear
     // factor gave there, so the daytime sky does not move.
-    col += SUN_RADIANCE * MS_STRENGTH * msTint * msT * view *
+    col += g_sunRadiance * MS_STRENGTH * msTint * msT * view *
            0.26 * smoothstep(-0.25, 0.20, sd.y);
     return col;
 }
@@ -728,7 +753,7 @@ vec3 skyRadiance(vec3 rd, vec3 sd) {
 // lifts and warms the sky on the sunward side.
 vec3 sunDisc(vec3 rd, vec3 sd) {
     float mu = dot(rd, sd);
-    vec3 t = SUN_RADIANCE * sunTransmittance(sd);
+    vec3 t = g_sunRadiance * sunTransmittance(sd);
     vec3 col = t * 240.0 * smoothstep(0.99988, 0.99996, mu);
     col += t * 0.85 * pow(max(mu, 0.0), 2200.0);
     col += t * 0.020 * pow(max(mu, 0.0), 130.0);
@@ -911,7 +936,7 @@ float keyLuminance(vec3 radiance, vec3 sd, vec3 rdC) {
     // whichever radiance this evaluation is about -- a no-op for the live
     // side of the ratio, and the calibration radiance for the reference side.
     vec3 sky = skyRadiance(vec3(0.0, 1.0, 0.0), sd) *
-               (dot(radiance, LUMA) / dot(SUN_RADIANCE, LUMA));
+               (dot(radiance, LUMA) / dot(g_sunRadiance, LUMA));
     return dot(sunCol, LUMA) * ph + dot(sky, LUMA) * 1.2;
 }
 
@@ -949,7 +974,7 @@ float sceneExposure(vec3 sd, vec3 rdC) {
     const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
     float rGeo = keyLuminance(KEY_RADIANCE, keySunDirection(), rdC) /
                  max(keyLuminance(KEY_RADIANCE, sd, rdC), 1e-5);
-    float rRad = dot(KEY_RADIANCE, LUMA) / max(dot(SUN_RADIANCE, LUMA), 1e-5);
+    float rRad = dot(KEY_RADIANCE, LUMA) / max(dot(g_sunRadiance, LUMA), 1e-5);
     return EXPOSURE * pow(rGeo, rGeo > 1.0 ? 0.85 : 1.0)
                     * pow(rRad, rRad > 1.0 ? 0.50 : 1.0);
 }
@@ -964,7 +989,7 @@ float sceneExposure(vec3 sd, vec3 rdC) {
 float nightness() {
     const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
     float stops = log2(dot(KEY_RADIANCE, LUMA) /
-                       max(dot(SUN_RADIANCE, LUMA), 1e-5));
+                       max(dot(g_sunRadiance, LUMA), 1e-5));
     return smoothstep(1.5, 4.0, stops);
 }
 

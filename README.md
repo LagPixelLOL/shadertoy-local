@@ -569,7 +569,7 @@ Each directory in `examples/` is a runnable project with its own
 | `05-interactive` | Keyboard rows and `iMouse` |
 | `06-portable-common` | Uniform-struct protocol for a lint-clean Common tab |
 | `07-path-traced-box` | All five passes at once: a path tracer plus a denoiser |
-| `08-cumulonimbus` | Volumetric raymarching: the boiling crown of a storm cloud under a low sun |
+| `08-cumulonimbus` | Volumetric raymarching: a storm cloud's boiling crown; steer the sun with the mouse, `S` for moonlight |
 
 ```bash
 shadertoy render -C examples/03-feedback-trail --frame 120

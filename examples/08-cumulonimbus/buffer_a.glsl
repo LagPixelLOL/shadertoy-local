@@ -3,6 +3,7 @@
 //  Buffer B averages sixteen of them.
 //
 //  iChannel0: RGBA Noise Medium (256), linear/repeat -- the value-noise tile
+//  iChannel1: keyboard -- S toggles sun/moon; iMouse steers the sun
 //  output:    rgb = light scattered toward the camera (aerial perspective
 //             already applied), a = transmittance of the whole ray
 //
@@ -136,6 +137,9 @@ float ambientMarch(sampler2D tex, vec3 p, float time, float jitter) {
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    // Steerable light: mouse places the sun, the S toggle swaps it for a
+    // moon. Row 2 of the keyboard texture is the toggle row; 83 is S.
+    setupLighting(iMouse, iResolution, texelFetch(iChannel1, ivec2(83, 2), 0).x);
     vec3 sd = sunDirection(iTime);
 
     // Sub-pixel jitter, resolved by Buffer B into an anti-aliased silhouette.
@@ -148,7 +152,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     float t0, t1;
     if (boxRange(ro, rd, t0, t1)) {
-        vec3 sunCol = SUN_RADIANCE * sunTransmittance(sd);
+        vec3 sunCol = g_sunRadiance * sunTransmittance(sd);
 
         // The ambient refill floor's strength, against the calibration key:
         // see ambientScatter. Two factors, both geometric. Reddening -- a

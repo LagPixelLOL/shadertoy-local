@@ -2,6 +2,7 @@
 //  Image -- put the sky behind the cloud, add the shafts, expose and tonemap.
 //
 //  iChannel0: Buffer B (rgb = scattered light, a = transmittance), linear
+//  iChannel1: keyboard -- S toggles sun/moon; iMouse steers the sun
 //
 //  Buffers mean this shader has to be run forward from frame 0, which the
 //  renderer does by default (--precharge all):
@@ -22,6 +23,8 @@
 #define SHAFT_STRENGTH 0.055
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    // Same lighting state as Buffer A: see setupLighting.
+    setupLighting(iMouse, iResolution, texelFetch(iChannel1, ivec2(83, 2), 0).x);
     vec3 sd = sunDirection(iTime);
     vec2 ang = cameraAngles(iTime);
     vec3 ro, rd;
@@ -66,7 +69,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // so they belong near the sun and nowhere else; without this the blur
         // lays a grey veil across the whole frame.
         float lobe = pow(max(dot(rd, sd), 0.0), 14.0);
-        col += SUN_RADIANCE * sunTransmittance(sd) *
+        col += g_sunRadiance * sunTransmittance(sd) *
                (shaft / total) * lobe * SHAFT_STRENGTH;
     }
 
