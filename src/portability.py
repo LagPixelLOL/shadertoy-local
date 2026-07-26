@@ -314,11 +314,103 @@ def _struct_ternary_type(
 
 def lint_all(project: Project) -> list[Diagnostic]:
     """Every portability check, in reporting order."""
-    return [*lint_common(project), *lint_struct_ternary(project)]
+    return [
+        *lint_common(project),
+        *lint_struct_ternary(project),
+        *lint_reserved_words(project),
+    ]
+
+
+# --------------------------------------------------------------------------
+# Identifiers reserved in GLSL ES
+# --------------------------------------------------------------------------
+
+#: Words the GLSL ES 3.00 specification reserves (section 3.7), restricted to
+#: those a desktop driver will happily accept as plain identifiers. Declaring
+#: ``float active;`` compiles without a murmur on NVIDIA's GL 4.6 -- and stops
+#: the same shader dead on shadertoy.com with ``'active' : Illegal use of
+#: reserved word``. That divergence is exactly the kind this tool exists to
+#: catch before the site does: it was found by pasting a shader that had
+#: passed every local check.
+#:
+#: Real keywords of *both* dialects (``if``, ``return``, ``uniform``...) are
+#: not here, since the local compile already rejects them; this list is the
+#: silent set.
+RESERVED_ES_WORDS = frozenset({
+    "active", "asm", "attribute", "cast", "class", "coherent", "common",
+    "enum", "extern", "external", "filter", "fixed", "fvec2", "fvec3",
+    "fvec4", "goto", "half", "hvec2", "hvec3", "hvec4", "inline", "input",
+    "interface", "long", "namespace", "noinline", "output", "packed",
+    "partition", "public", "readonly", "resource", "restrict", "sample",
+    "short", "sizeof", "static", "subroutine", "superp", "template", "this",
+    "typedef", "union", "unsigned", "using", "varying", "volatile",
+    "writeonly",
+})
+
+_RESERVED = re.compile(
+    r"\b(" + "|".join(sorted(RESERVED_ES_WORDS, key=len, reverse=True)) + r")\b"
+)
+
+#: Reported as an error for the same reason ST-TERNARY is: the shader does not
+#: compile on shadertoy.com at all, so a clean local run would be misleading.
+RESERVED_EXPLANATION = (
+    "GLSL ES reserves these words, and shadertoy.com runs WebGL, so using one "
+    "as an identifier fails to compile there ('Illegal use of reserved word') "
+    "even though desktop drivers accept it silently. Rename the identifier. "
+    "Use --no-portability to build anyway."
+)
+
+
+def lint_reserved_words(project: Project) -> list[Diagnostic]:
+    """Flag identifiers that GLSL ES reserves but desktop GL accepts."""
+    sources: list[tuple[str, str, str | None]] = []
+    if project.common is not None and project.common_path is not None:
+        try:
+            display = str(project.common_path.relative_to(project.root))
+        except ValueError:  # pragma: no cover
+            display = str(project.common_path)
+        sources.append((display, project.common, "common"))
+    for spec in project.ordered_passes:
+        try:
+            display = str(spec.path.relative_to(project.root))
+        except ValueError:  # pragma: no cover
+            display = str(spec.path)
+        sources.append((display, spec.source, spec.name))
+
+    diagnostics: list[Diagnostic] = []
+    for display, text, pass_name in sources:
+        cleaned = strip_comments(text)
+        for lineno, line in enumerate(cleaned.split("\n"), start=1):
+            # Unlike ST-COMMON, macro bodies are *not* exempt: a reserved
+            # word inside a #define fails on the site wherever the macro is
+            # expanded, which is precisely where the compiler's own error
+            # message will point away from the actual culprit.
+            seen: set[str] = set()
+            for match in _RESERVED.finditer(line):
+                name = match.group(1)
+                if name in seen:
+                    continue
+                seen.add(name)
+                diagnostics.append(
+                    Diagnostic(
+                        severity="error",
+                        message=(
+                            f"{name!r} is reserved in GLSL ES and does not "
+                            f"compile on shadertoy.com; rename it"
+                        ),
+                        pass_name=pass_name,
+                        file=display,
+                        line=lineno,
+                        column=match.start() + 1,
+                        code="ST-RESERVED",
+                    )
+                )
+    return diagnostics
 
 
 #: Footers to print, keyed by the diagnostic code that triggers them.
 EXPLANATIONS = {
     "ST-COMMON": EXPLANATION,
     "ST-TERNARY": TERNARY_EXPLANATION,
+    "ST-RESERVED": RESERVED_EXPLANATION,
 }

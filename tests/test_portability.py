@@ -298,7 +298,7 @@ class TestSeverityDistinction:
         assert all(d.severity == "warning" for d in diagnostics)
         assert all(not d.is_error for d in diagnostics)
 
-    def test_lint_all_reports_both(self, make_project):
+    def test_lint_all_reports_every_check(self, make_project):
         from shadertoy_local.portability import lint_all
 
         common = (
@@ -309,8 +309,119 @@ class TestSeverityDistinction:
         root = make_project(
             {
                 "common.glsl": common,
-                "image.glsl": "void mainImage(out vec4 c, in vec2 f){ c=vec4(t()); }\n",
+                "image.glsl": (
+                    "void mainImage(out vec4 c, in vec2 f){"
+                    " float active = t(); c=vec4(active); }\n"
+                ),
             }
         )
         codes = {d.code: d.severity for d in lint_all(load_project(root))}
-        assert codes == {"ST-COMMON": "warning", "ST-TERNARY": "error"}
+        assert codes == {
+            "ST-COMMON": "warning",
+            "ST-TERNARY": "error",
+            "ST-RESERVED": "error",
+        }
+
+
+def _reserved(make_project, image: str, common: str = ""):
+    from shadertoy_local.portability import lint_reserved_words
+
+    files = {"image.glsl": image}
+    if common:
+        files["common.glsl"] = common
+    return lint_reserved_words(load_project(make_project(files)))
+
+
+class TestReservedWords:
+    """GLSL ES reserves words that desktop drivers accept as identifiers
+    without a murmur -- `float active;` compiles on NVIDIA GL 4.6 and stops
+    the same shader dead on shadertoy.com. A hard failure there must be a
+    hard failure here; found by pasting a shader that had passed every local
+    check.
+    """
+
+    def test_flags_reserved_identifier_as_error(self, make_project):
+        image = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    float active = 1.0;\n"
+            "    c = vec4(active);\n"
+            "}\n"
+        )
+        diagnostics = _reserved(make_project, image)
+        assert len(diagnostics) == 2  # declaration and use
+        assert all(d.severity == "error" for d in diagnostics)
+        assert all(d.is_error for d in diagnostics)
+        assert all(d.code == "ST-RESERVED" for d in diagnostics)
+        assert "active" in diagnostics[0].message
+
+    def test_reports_accurate_position(self, make_project):
+        image = "void mainImage(out vec4 c, in vec2 f){ float filter = 1.0; c = vec4(filter); }\n"
+        diagnostics = _reserved(make_project, image)
+        first = diagnostics[0]
+        assert first.line == 1
+        assert image[first.column - 1 :].startswith("filter")
+
+    def test_flags_common_too(self, make_project):
+        common = "float half = 0.5;\n"
+        image = "void mainImage(out vec4 c, in vec2 f){ c = vec4(1.0); }\n"
+        diagnostics = _reserved(make_project, image, common=common)
+        assert len(diagnostics) == 1
+        assert diagnostics[0].file == "common.glsl"
+        assert diagnostics[0].pass_name == "common"
+
+    def test_substrings_are_not_matched(self, make_project):
+        image = (
+            "void mainImage(out vec4 c, in vec2 f){\n"
+            "    float activeCount = 1.0;  float interactive = 2.0;\n"
+            "    c = vec4(activeCount * interactive);\n"
+            "}\n"
+        )
+        assert _reserved(make_project, image) == []
+
+    def test_comments_are_ignored(self, make_project):
+        image = (
+            "// the active turret, using a filter\n"
+            "/* input and output */\n"
+            "void mainImage(out vec4 c, in vec2 f){ c = vec4(1.0); }\n"
+        )
+        assert _reserved(make_project, image) == []
+
+    def test_define_bodies_are_not_exempt(self, make_project):
+        """Unlike ST-COMMON: a reserved word in a macro fails on the site
+        wherever the macro is expanded, so the definition is the right place
+        to point at."""
+        image = (
+            "#define PICK(x) float active = (x);\n"
+            "void mainImage(out vec4 c, in vec2 f){ PICK(1.0) c = vec4(active); }\n"
+        )
+        diagnostics = _reserved(make_project, image)
+        assert any(d.line == 1 for d in diagnostics)
+
+    def test_every_reserved_word_is_detected(self, make_project):
+        from shadertoy_local.portability import RESERVED_ES_WORDS
+
+        for word in sorted(RESERVED_ES_WORDS):
+            image = (
+                "void mainImage(out vec4 c, in vec2 f){\n"
+                f"    float {word} = 1.0;\n"
+                "    c = vec4(1.0);\n"
+                "}\n"
+            )
+            diagnostics = _reserved(make_project, image)
+            assert diagnostics, f"{word} was not flagged"
+
+    def test_clean_shader_is_silent(self, make_project):
+        image = "void mainImage(out vec4 c, in vec2 f){ float growth = 1.0; c = vec4(growth); }\n"
+        assert _reserved(make_project, image) == []
+
+    def test_every_example_is_clean(self):
+        from pathlib import Path
+
+        from shadertoy_local.portability import lint_reserved_words
+
+        examples = Path(__file__).resolve().parent.parent / "examples"
+        for path in sorted(examples.iterdir()):
+            if not path.is_dir():
+                continue
+            found = lint_reserved_words(load_project(path))
+            assert found == [], f"{path.name}: {[d.message for d in found]}"

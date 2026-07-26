@@ -387,14 +387,38 @@ NVIDIA's `conflicts with previous declaration at 0(5)`) are remapped too.
 ## shadertoy.com portability
 
 `shadertoy check` also reports where a project would behave differently on the
-real site. Severity tracks consequence, and the two current checks differ:
+real site. Severity tracks consequence:
 
 | Code | Severity | Because |
 |---|---|---|
 | `ST-COMMON` | warning | The shader still compiles and renders on the site; only the editor's standalone validation complains |
 | `ST-TERNARY` | **error** | The shader does not compile on the site at all |
+| `ST-RESERVED` | **error** | The shader does not compile on the site at all |
 
-Both are on by default; `--no-portability` skips them.
+All are on by default; `--no-portability` skips them.
+
+### ST-RESERVED: identifiers reserved in GLSL ES
+
+GLSL ES reserves a set of words that desktop drivers accept as plain
+identifiers without a murmur — `float active;` compiles on NVIDIA GL 4.6 and
+stops the same shader dead on shadertoy.com with `'active' : Illegal use of
+reserved word`. `filter`, `input`, `output`, `half`, `sample` and some forty
+others are in the same set, and several are natural variable names, which is
+exactly how this was found: a shader that passed every local check refused to
+compile the moment it was pasted into the site.
+
+```
+$ shadertoy check
+image.glsl:2:11: error [ST-RESERVED]: 'active' is reserved in GLSL ES and does not compile on shadertoy.com; rename it
+failed: 1 error(s), 0 warning(s)
+```
+
+Comments are ignored; `#define` bodies are **not** exempt (unlike ST-COMMON),
+because a reserved word in a macro fails on the site wherever the macro is
+expanded — and the site's own error message will point at the expansion, not
+the definition. Real keywords of both dialects (`if`, `uniform`, ...) are not
+in the list, since the local compile already rejects them; this is the silent
+set.
 
 ### ST-TERNARY: `?:` on struct types
 
