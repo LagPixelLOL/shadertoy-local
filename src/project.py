@@ -106,6 +106,45 @@ LOCAL_ONLY_BUILTINS = (
 
 BUILTIN_TEXTURES = (*SHADERTOY_LIKE_BUILTINS, *LOCAL_ONLY_BUILTINS, "keyboard")
 
+#: Convenience aliases resolve to one canonical builtin. This matters beyond
+#: spelling: on shadertoy.com "noise" and "rgba-noise-medium" would both be
+#: the *same* stock asset, hence the same texture object, hence one set of
+#: sampler settings -- so identity checks and the runtime texture cache must
+#: agree that they are one thing.
+BUILTIN_ALIASES = {
+    "noise": "rgba-noise-medium",
+    "rgba-noise": "rgba-noise-medium",
+    "gray-noise": "gray-noise-medium",
+}
+
+#: Canonical name -> default edge length. Kept beside the aliases (rather than
+#: with the generators in channels.py) because load-time validation needs it:
+#: a builtin referenced once with no size and once with its default spelled
+#: out is still one texture.
+BUILTIN_DEFAULT_SIZES = {
+    "rgba-noise-small": 64,
+    "rgba-noise-medium": 256,
+    "gray-noise-small": 64,
+    "gray-noise-medium": 256,
+    "blue-noise": 1024,
+    "bayer": 16,
+    "checker": 256,
+    "uv": 256,
+    "gradient": 256,
+    "white": 8,
+    "black": 8,
+}
+
+
+def canonical_builtin(name: str) -> str:
+    return BUILTIN_ALIASES.get(name, name)
+
+
+def builtin_identity(source: str, size: int | None) -> tuple[str, int | None]:
+    """The (canonical name, effective size) pair that names one texture."""
+    name = canonical_builtin(source)
+    return (name, size if size is not None else BUILTIN_DEFAULT_SIZES.get(name))
+
 
 _FILTERS = ("nearest", "linear", "mipmap")
 _WRAPS = ("clamp", "repeat")
@@ -578,6 +617,33 @@ def _parse_channel(
         if "wrap" not in spec:
             binding.wrap = "clamp"
         binding.vflip = False
+    elif binding.is_keyboard:
+        # shadertoy.com's keyboard slot offers nearest and linear filtering
+        # only -- there is no mipmap entry in its dialog -- and its wrap is
+        # fixed at clamp. There is also nothing meaningful to flip: the three
+        # rows are addressed by texelFetch row index, and a silently ignored
+        # vflip would be the usual worst outcome. The filter defaults to
+        # nearest, which is what a key-state lookup wants and what this
+        # runtime always did.
+        if binding.filter == "mipmap":
+            raise ProjectError(
+                f'{where}: filter "mipmap" is not supported for the keyboard; '
+                f"shadertoy.com offers nearest and linear only"
+            )
+        if "wrap" in spec and binding.wrap != "clamp":
+            raise ProjectError(
+                f"{where}: the keyboard's wrap is always clamp on "
+                f"shadertoy.com; wrap={binding.wrap!r} cannot be reproduced "
+                f"there"
+            )
+        if "vflip" in spec:
+            raise ProjectError(
+                f'{where}: "vflip" is not supported for keyboard channels'
+            )
+        if "filter" not in spec:
+            binding.filter = "nearest"
+        binding.wrap = "clamp"
+        binding.vflip = False
     elif binding.is_builtin:
         if "vflip" not in spec:
             binding.vflip = False
@@ -594,40 +660,69 @@ def _parse_channel(
     return binding
 
 
-def _validate_buffer_samplers(passes: dict[str, "PassSpec"]) -> None:
-    """Require every reference to a buffer to request the same sampler settings.
+def _validate_shared_samplers(passes: dict[str, "PassSpec"]) -> None:
+    """Require every reference to one input to request the same sampler settings.
 
-    On shadertoy.com a buffer's filter and wrap belong to the *buffer*, not to the
-    channel that reads it: changing them on one reference changes every reference,
-    because GL stores sampler state on the texture object. A config asking for two
-    different settings for one buffer is therefore inexpressible on the real site,
-    so it is rejected rather than resolved arbitrarily in favour of whichever
-    binding happens to be applied last.
+    On shadertoy.com the filter and wrap belong to the *input* -- buffer,
+    texture asset, or the keyboard -- not to the channel that reads it:
+    changing them on one reference changes every reference, because GL stores
+    sampler state on the texture object and the site has one texture object
+    per input. A config asking for two different settings for one input is
+    therefore inexpressible on the real site, so it is rejected rather than
+    resolved arbitrarily in favour of whichever binding happens to be applied
+    last. (Buffers had this check from the start; that textures and the
+    keyboard behave the same way was verified on the site and reported.)
+
+    The identity is the underlying object: a buffer name, a resolved texture
+    path, a builtin name at a given size, or the keyboard, of which there is
+    exactly one. vflip participates for image-backed inputs, since it is
+    baked into the upload.
     """
-    seen: dict[str, tuple[str, tuple[str, str]]] = {}
+    seen: dict[tuple, tuple[str, str, str]] = {}
     for name in PASS_NAMES:
         spec = passes.get(name)
         if spec is None:
             continue
         for index, binding in sorted(spec.channels.items()):
-            if not binding.is_buffer:
-                continue
-            settings = (binding.filter, binding.wrap)
+            if binding.is_buffer:
+                identity: tuple = ("buffer", binding.source)
+                described = binding.source
+                owner = "buffer"
+                settings = f"filter={binding.filter}, wrap={binding.wrap}"
+            elif binding.is_keyboard:
+                identity = ("keyboard",)
+                described = "the keyboard"
+                owner = "keyboard"
+                settings = f"filter={binding.filter}"
+            elif binding.is_builtin:
+                identity = ("builtin", *builtin_identity(binding.source, binding.size))
+                described = binding.source
+                owner = "texture"
+                settings = (
+                    f"filter={binding.filter}, wrap={binding.wrap}, "
+                    f"vflip={'on' if binding.vflip else 'off'}"
+                )
+            else:
+                identity = ("texture", str(binding.path))
+                described = binding.source
+                owner = "texture"
+                settings = (
+                    f"filter={binding.filter}, wrap={binding.wrap}, "
+                    f"vflip={'on' if binding.vflip else 'off'}"
+                )
             where = f"[{name}] channel{index}"
-            if binding.source not in seen:
-                seen[binding.source] = (where, settings)
+            if identity not in seen:
+                seen[identity] = (where, settings, described)
                 continue
-            first_where, first_settings = seen[binding.source]
+            first_where, first_settings, _ = seen[identity]
             if settings != first_settings:
                 raise ProjectError(
-                    f"{where} reads {binding.source} with "
-                    f"filter={settings[0]}, wrap={settings[1]}, but {first_where} "
-                    f"reads it with filter={first_settings[0]}, "
-                    f"wrap={first_settings[1]}.\n"
-                    f"A buffer's sampler settings belong to the buffer, not to the "
-                    f"channel: on shadertoy.com changing them on one reference "
-                    f"changes every reference. Use the same settings everywhere "
-                    f"{binding.source} is read."
+                    f"{where} reads {described} with {settings}, but "
+                    f"{first_where} reads it with {first_settings}.\n"
+                    f"A {owner}'s sampler settings belong to the {owner}, not "
+                    f"to the channel: on shadertoy.com changing them on one "
+                    f"reference changes every reference. Use the same settings "
+                    f"everywhere {described} is read."
                 )
 
 
@@ -748,7 +843,7 @@ def load_project(path: Path | str = ".", *, search_parents: bool = True) -> Proj
                 continue
             spec.channels[index] = _parse_channel(raw, root, name, index, declared)
 
-    _validate_buffer_samplers(passes)
+    _validate_shared_samplers(passes)
 
     return Project(
         root=root,

@@ -37,9 +37,23 @@ def _sources() -> dict[str, str]:
 class TestBuiltinTextureLists:
     def test_declared_builtins_all_have_generators(self):
         """A builtin accepted by config validation but unknown to the generator
-        would pass `check` and then fail at render."""
-        declared = set(project.BUILTIN_TEXTURES) - {"keyboard"}
+        would pass `check` and then fail at render. Aliases resolve to a
+        canonical name first; every canonical name needs a generator and a
+        default size, and every generator must be reachable from the declared
+        list."""
+        declared = {
+            project.canonical_builtin(name)
+            for name in project.BUILTIN_TEXTURES
+            if name != "keyboard"
+        }
         assert declared == set(channels._GENERATORS)
+        assert declared == set(project.BUILTIN_DEFAULT_SIZES)
+
+    def test_aliases_resolve_to_declared_builtins(self):
+        for alias, target in project.BUILTIN_ALIASES.items():
+            assert alias in project.BUILTIN_TEXTURES
+            assert target in project.BUILTIN_TEXTURES
+            assert target not in project.BUILTIN_ALIASES, "aliases must not chain"
 
     def test_builtin_texture_groups_partition_the_whole_list(self):
         assert set(project.BUILTIN_TEXTURES) == (

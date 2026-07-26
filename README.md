@@ -86,7 +86,7 @@ Shadertoy lacks.
 | `buffer` | `buffer_a`..`buffer_d` | Defaults to `linear`/`clamp` — matching shadertoy.com. Settings are per *buffer*, see below |
 | `texture` | path relative to project root | Any format Pillow reads |
 | `builtin` | see below | Procedural, needs no asset files |
-| `keyboard` | *(none needed)* | 256x3 key state texture |
+| `keyboard` | *(none needed)* | 256x3 key state texture. Filter `nearest` (default) or `linear` only, wrap is always `clamp` — matching the site's dialog |
 
 Builtin textures are procedurally generated and deterministic (fixed seed), so
 golden tests stay stable. They fall into two groups, and the distinction matters
@@ -116,14 +116,15 @@ builtin if one is wrong.
 `"0": "buffer_a"` is shorthand for the full object; `type` is inferred from
 `source` and validated when given.
 
-### Buffer sampler settings belong to the buffer
+### Sampler settings belong to the input, not the channel
 
-On shadertoy.com a buffer's `filter` and `wrap` are properties of the **buffer**,
-not of the channel reading it: change them on one reference and every reference
-changes, because GL stores sampler state on the texture object. Asking for two
-different settings for one buffer is therefore inexpressible on the real site, and
-is rejected here rather than resolved in favour of whichever binding is applied
-last:
+On shadertoy.com `filter` and `wrap` are properties of the **input** — the
+buffer, the texture asset, or the keyboard — not of the channel reading it:
+change them on one reference and every reference changes, because GL stores
+sampler state on the texture object and the site has one texture object per
+input. Asking for two different settings for one input is therefore
+inexpressible on the real site, and is rejected here rather than resolved in
+favour of whichever binding is applied last:
 
 ```
 error: [image] channel1 reads buffer_a with filter=nearest, wrap=clamp, but
@@ -132,8 +133,20 @@ A buffer's sampler settings belong to the buffer, not to the channel: on
 shadertoy.com changing them on one reference changes every reference.
 ```
 
-The constraint is per buffer, so different buffers may use different settings.
-`vflip` is rejected on buffer channels, since buffers are never flipped.
+The identity is the underlying object, however it is spelled: `noise` and
+`rgba-noise-medium` are one asset, a builtin at its default size and the same
+builtin with that size written out are one texture, and so are two spellings
+of one file path. `vflip` participates for image-backed inputs, since the
+flip is baked into the pixel upload; it is rejected outright on buffer and
+keyboard channels, where there is nothing to flip.
+
+The constraint is per input, so two different buffers — or two different
+sizes of one builtin, which really are two textures — may use different
+settings.
+
+The keyboard is further restricted to what the site's dialog offers: filter
+`nearest` or `linear` (no mipmap) and wrap `clamp`, always. Anything else is
+rejected at `shadertoy check` time.
 
 ### Validation is strict
 

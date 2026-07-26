@@ -1403,3 +1403,406 @@ class TestCountEveryContiguityViaCli:
         ]
         assert [f["frame"] for f in payload["frames"]] == [0, 20, 40]
         assert counts == [1, 21, 41]
+
+
+class TestKeyboardChannelOptions:
+    """The keyboard slot on shadertoy.com offers nearest and linear filtering
+    only, its wrap is fixed at clamp, and there is nothing to flip. Anything
+    else in the config would render here and be inexpressible there --
+    verified on the site and reported."""
+
+    IMAGE = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = texelFetch(iChannel0, ivec2(83, 0), 0);\n"
+        "}\n"
+    )
+
+    def _config(self, channel: dict) -> dict:
+        return {"image": {"channels": {"0": channel}}}
+
+    def test_mipmap_is_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.IMAGE},
+            config=self._config({"type": "keyboard", "filter": "mipmap"}),
+        )
+        with pytest.raises(ProjectError, match="nearest and linear only"):
+            load_project(root)
+
+    def test_wrap_repeat_is_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.IMAGE},
+            config=self._config({"type": "keyboard", "wrap": "repeat"}),
+        )
+        with pytest.raises(ProjectError, match="always clamp"):
+            load_project(root)
+
+    def test_vflip_is_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.IMAGE},
+            config=self._config({"type": "keyboard", "vflip": True}),
+        )
+        with pytest.raises(ProjectError, match="not supported for keyboard"):
+            load_project(root)
+
+    def test_explicit_clamp_and_linear_are_accepted(self, make_project):
+        root = make_project(
+            {"image.glsl": self.IMAGE},
+            config=self._config(
+                {"type": "keyboard", "filter": "linear", "wrap": "clamp"}
+            ),
+        )
+        binding = load_project(root).passes["image"].channels[0]
+        assert binding.filter == "linear"
+
+    def test_defaults_are_nearest_and_clamp(self, make_project):
+        """Nearest, not the generic linear default: a key-state lookup wants
+        exact texels, and this runtime has always sampled it nearest."""
+        root = make_project(
+            {"image.glsl": self.IMAGE}, config=self._config({"type": "keyboard"})
+        )
+        binding = load_project(root).passes["image"].channels[0]
+        assert binding.filter == "nearest"
+        assert binding.wrap == "clamp"
+        assert binding.vflip is False
+
+
+class TestSharedSamplerSettings:
+    """One input, one set of sampler settings -- for textures, builtins and
+    the keyboard exactly as for buffers, because the site stores the state on
+    the one texture object behind all the references. Buffers had this check
+    from the start; the site behaviour for the rest was verified and reported.
+    """
+
+    TWO_CHANNELS = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = vec4(texture(iChannel0, vec2(0.5)).r,\n"
+        "             texture(iChannel1, vec2(0.5)).r, 0.0, 1.0);\n"
+        "}\n"
+    )
+
+    def test_conflicting_builtin_filters_are_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "noise", "filter": "nearest"},
+                        "1": {"type": "builtin", "source": "noise", "filter": "linear"},
+                    }
+                }
+            },
+        )
+        with pytest.raises(ProjectError, match="belong to the texture"):
+            load_project(root)
+
+    def test_conflicting_builtin_vflip_is_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "noise", "vflip": True},
+                        "1": {"type": "builtin", "source": "noise", "vflip": False},
+                    }
+                }
+            },
+        )
+        with pytest.raises(ProjectError, match="changes every reference"):
+            load_project(root)
+
+    def test_conflicting_texture_files_are_rejected(self, make_project, tmp_path):
+        import numpy as np
+        from PIL import Image
+
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "texture", "source": "tex.png", "wrap": "clamp"},
+                        "1": {"type": "texture", "source": "tex.png", "wrap": "repeat"},
+                    }
+                }
+            },
+        )
+        Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(root / "tex.png")
+        with pytest.raises(ProjectError, match="belong to the texture"):
+            load_project(root)
+
+    def test_conflicting_keyboard_filters_are_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "keyboard", "filter": "nearest"},
+                        "1": {"type": "keyboard", "filter": "linear"},
+                    }
+                }
+            },
+        )
+        with pytest.raises(ProjectError, match="belong to the keyboard"):
+            load_project(root)
+
+    def test_conflicts_are_found_across_passes(self, make_project):
+        root = make_project(
+            {
+                "buffer_a.glsl": self.TWO_CHANNELS,
+                "image.glsl": self.TWO_CHANNELS,
+            },
+            config={
+                "buffer_a": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "noise", "filter": "nearest"}
+                    }
+                },
+                "image": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "noise", "filter": "mipmap"},
+                    }
+                },
+            },
+        )
+        with pytest.raises(ProjectError, match="every reference"):
+            load_project(root)
+
+    def test_matching_settings_are_accepted(self, make_project):
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "noise", "filter": "nearest"},
+                        "1": {"type": "builtin", "source": "noise", "filter": "nearest"},
+                    }
+                }
+            },
+        )
+        assert load_project(root) is not None
+
+    def test_different_sizes_of_a_builtin_may_differ(self, make_project):
+        """Two sizes of one builtin are two textures, locally as on any GL:
+        the constraint binds references to the *same* object."""
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "gray-noise-small",
+                              "filter": "nearest", "size": 32},
+                        "1": {"type": "builtin", "source": "gray-noise-small",
+                              "filter": "linear", "size": 64},
+                    }
+                }
+            },
+        )
+        assert load_project(root) is not None
+
+    def test_different_files_may_differ(self, make_project):
+        import numpy as np
+        from PIL import Image
+
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "texture", "source": "a.png", "wrap": "clamp"},
+                        "1": {"type": "texture", "source": "b.png", "wrap": "repeat"},
+                    }
+                }
+            },
+        )
+        for name in ("a.png", "b.png"):
+            Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(root / name)
+        assert load_project(root) is not None
+
+
+class TestSharedIdentityResolution:
+    """The identity behind the sampler-sharing check is the *object*, however
+    it is spelled: an alias and its canonical name, a default size and the
+    same size written out, two spellings of one path. Each of these pairs is
+    one texture on the site, so disagreeing settings must be rejected even
+    though the strings differ -- and matching settings must not be, even
+    though the strings differ."""
+
+    TWO_CHANNELS = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = vec4(texture(iChannel0, vec2(0.5)).r,\n"
+        "             texture(iChannel1, vec2(0.5)).r, 0.0, 1.0);\n"
+        "}\n"
+    )
+
+    def test_alias_and_canonical_name_are_one_texture(self, make_project):
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "noise", "filter": "nearest"},
+                        "1": {"type": "builtin", "source": "rgba-noise-medium",
+                              "filter": "linear"},
+                    }
+                }
+            },
+        )
+        with pytest.raises(ProjectError, match="every reference"):
+            load_project(root)
+
+    def test_default_size_and_explicit_default_are_one_texture(self, make_project):
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "bayer", "filter": "nearest"},
+                        "1": {"type": "builtin", "source": "bayer", "size": 16,
+                              "filter": "linear"},
+                    }
+                }
+            },
+        )
+        with pytest.raises(ProjectError, match="every reference"):
+            load_project(root)
+
+    def test_two_spellings_of_one_path_are_one_texture(self, make_project):
+        import numpy as np
+        from PIL import Image
+
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "texture", "source": "textures/tex.png",
+                              "wrap": "clamp"},
+                        "1": {"type": "texture", "source": "./textures/../textures/tex.png",
+                              "wrap": "repeat"},
+                    }
+                }
+            },
+        )
+        (root / "textures").mkdir()
+        Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(
+            root / "textures" / "tex.png"
+        )
+        with pytest.raises(ProjectError, match="belong to the texture"):
+            load_project(root)
+
+    def test_matching_settings_through_an_alias_are_accepted(self, make_project):
+        root = make_project(
+            {"image.glsl": self.TWO_CHANNELS},
+            config={
+                "image": {
+                    "channels": {
+                        "0": {"type": "builtin", "source": "noise", "filter": "nearest"},
+                        "1": {"type": "builtin", "source": "rgba-noise-medium",
+                              "filter": "nearest"},
+                    }
+                }
+            },
+        )
+        assert load_project(root) is not None
+
+
+class _FakeTexture:
+    def __init__(self):
+        self.filter = None
+        self.repeat_x = None
+        self.repeat_y = None
+
+    def build_mipmaps(self):
+        pass
+
+
+class _FakeCtx:
+    NEAREST = 1
+    LINEAR = 2
+    LINEAR_MIPMAP_LINEAR = 3
+
+    def texture(self, *args, **kwargs):
+        return _FakeTexture()
+
+
+class TestChannelTextureCacheIdentity:
+    """The runtime cache must agree with load-time validation about what "one
+    texture" means, or an alias would quietly get its own GL object and the
+    shared-settings guarantee would hold on paper only."""
+
+    def _binding(self, source, size=None, filter="linear"):
+        from shadertoy_local.project import ChannelBinding
+
+        return ChannelBinding(
+            source=source, kind="builtin", filter=filter, wrap="repeat",
+            vflip=False, size=size,
+        )
+
+    def test_alias_shares_the_cached_texture(self):
+        from shadertoy_local.channels import ChannelTextures
+
+        channels = ChannelTextures(_FakeCtx())
+        a = channels.get(self._binding("noise"))
+        b = channels.get(self._binding("rgba-noise-medium"))
+        assert a is b
+
+    def test_explicit_default_size_shares_the_cached_texture(self):
+        from shadertoy_local.channels import ChannelTextures
+
+        channels = ChannelTextures(_FakeCtx())
+        a = channels.get(self._binding("bayer"))
+        b = channels.get(self._binding("bayer", size=16))
+        assert a is b
+
+    def test_different_sizes_are_different_textures(self):
+        from shadertoy_local.channels import ChannelTextures
+
+        channels = ChannelTextures(_FakeCtx())
+        a = channels.get(self._binding("bayer"))
+        b = channels.get(self._binding("bayer", size=32))
+        assert a is not b
+
+
+class TestBrokenKeyboardConfigs:
+    """Deliberately wrong keyboard configs must fail loudly at load time, not
+    render with silently corrected settings."""
+
+    IMAGE = (
+        "void mainImage(out vec4 c, in vec2 f){\n"
+        "    c = texelFetch(iChannel0, ivec2(83, 0), 0);\n"
+        "}\n"
+    )
+
+    def _config(self, channel: dict) -> dict:
+        return {"image": {"channels": {"0": channel}}}
+
+    def test_garbage_filter_value_is_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.IMAGE},
+            config=self._config({"type": "keyboard", "filter": "bilinear"}),
+        )
+        with pytest.raises(ProjectError, match="filter"):
+            load_project(root)
+
+    def test_garbage_wrap_value_is_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.IMAGE},
+            config=self._config({"type": "keyboard", "wrap": "mirror"}),
+        )
+        with pytest.raises(ProjectError, match="wrap"):
+            load_project(root)
+
+    def test_size_is_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.IMAGE},
+            config=self._config({"type": "keyboard", "size": 512}),
+        )
+        with pytest.raises(ProjectError, match="size"):
+            load_project(root)
+
+    def test_keyboard_with_texture_source_is_rejected(self, make_project):
+        root = make_project(
+            {"image.glsl": self.IMAGE},
+            config=self._config({"type": "keyboard", "source": "tex.png"}),
+        )
+        with pytest.raises(ProjectError, match="keyboard"):
+            load_project(root)

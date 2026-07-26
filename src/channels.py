@@ -17,7 +17,14 @@ from typing import Any
 import numpy as np
 
 from .inputs import KEYBOARD_HEIGHT, KEYBOARD_WIDTH, InputState
-from .project import BUILTIN_TEXTURES, ChannelBinding, ProjectError
+from .project import (
+    BUILTIN_DEFAULT_SIZES,
+    BUILTIN_TEXTURES,
+    ChannelBinding,
+    ProjectError,
+    builtin_identity,
+    canonical_builtin,
+)
 
 #: Fixed seed so procedural textures are byte-identical across runs/machines.
 _SEED = 0x5EED1234
@@ -128,24 +135,23 @@ def _solid(size: int, value: int) -> np.ndarray:
 #: The second group has no counterpart on the site. They exist for local
 #: debugging, and a project using them cannot be reproduced there by binding a
 #: stock input.
-_GENERATORS: dict[str, tuple[Any, int]] = {
+#: Canonical names only; lookups go through canonical_builtin, and the default
+#: sizes live in project.BUILTIN_DEFAULT_SIZES so validation and rendering
+#: cannot disagree about what "the same texture" means.
+_GENERATORS: dict[str, Any] = {
     # -- approximations of shadertoy.com assets --
-    "rgba-noise-small": (_rgba_noise, 64),
-    "rgba-noise-medium": (_rgba_noise, 256),
-    "gray-noise-small": (_gray_noise, 64),
-    "gray-noise-medium": (_gray_noise, 256),
-    "blue-noise": (_blue_noise, 1024),
-    "bayer": (_bayer, 16),
-    # -- convenience aliases --
-    "noise": (_rgba_noise, 256),
-    "rgba-noise": (_rgba_noise, 256),
-    "gray-noise": (_gray_noise, 256),
+    "rgba-noise-small": _rgba_noise,
+    "rgba-noise-medium": _rgba_noise,
+    "gray-noise-small": _gray_noise,
+    "gray-noise-medium": _gray_noise,
+    "blue-noise": _blue_noise,
+    "bayer": _bayer,
     # -- local-only debug aids (no shadertoy.com equivalent) --
-    "checker": (_checker, 256),
-    "uv": (_uv, 256),
-    "gradient": (_gradient, 256),
-    "white": (lambda size: _solid(size, 255), 8),
-    "black": (lambda size: _solid(size, 0), 8),
+    "checker": _checker,
+    "uv": _uv,
+    "gradient": _gradient,
+    "white": lambda size: _solid(size, 255),
+    "black": lambda size: _solid(size, 0),
 }
 
 def sampler_filter_modes(ctx: Any, name: str) -> tuple[Any, Any]:
@@ -186,20 +192,20 @@ def builtin_array(name: str, size: int | None = None) -> np.ndarray:
     if one of the assumed shadertoy.com dimensions is wrong, a project can
     correct it without waiting on a code change.
     """
+    canonical = canonical_builtin(name)
     try:
-        generator, default_size = _GENERATORS[name]
+        generator = _GENERATORS[canonical]
     except KeyError:
         raise ProjectError(
             f"unknown builtin texture {name!r}. Available: "
             f"{', '.join(sorted(BUILTIN_TEXTURES))}"
         ) from None
-    return generator(int(size) if size else default_size)
+    return generator(int(size) if size else BUILTIN_DEFAULT_SIZES[canonical])
 
 
 def builtin_default_size(name: str) -> int | None:
     """Default edge length for a builtin, or ``None`` if unknown."""
-    entry = _GENERATORS.get(name)
-    return entry[1] if entry else None
+    return BUILTIN_DEFAULT_SIZES.get(canonical_builtin(name))
 
 
 def load_image_array(path: Path) -> np.ndarray:
@@ -224,11 +230,15 @@ class ChannelTextures:
         self._keyboard: Any | None = None
         self._owned: list[Any] = []
 
-    def keyboard(self, state: InputState) -> Any:
+    def keyboard(self, state: InputState, binding: ChannelBinding | None = None) -> Any:
         """The 256x3 keyboard texture, updated in place each frame.
 
         The state is already resolved for the frame in question, so no frame
-        index is needed here.
+        index is needed here. There is exactly one keyboard texture however
+        many channels read it, which is also how the site behaves -- and why
+        the project loader rejects references that disagree about its filter.
+        Wrap is always clamp and the filter is nearest or linear; both are
+        enforced at load time, so applying the binding here cannot fight.
         """
         if self._keyboard is None:
             self._keyboard = self.ctx.texture(
@@ -238,6 +248,8 @@ class ChannelTextures:
             self._keyboard.repeat_x = False
             self._keyboard.repeat_y = False
             self._owned.append(self._keyboard)
+        if binding is not None:
+            self._keyboard.filter = sampler_filter_modes(self.ctx, binding.filter)
         self._keyboard.write(state.keyboard_bytes())
         return self._keyboard
 
@@ -246,13 +258,22 @@ class ChannelTextures:
         if binding.is_buffer:
             raise AssertionError("buffer channels are resolved by the renderer")
 
+        # One cache entry per *object*, not per spelling: "noise" and
+        # "rgba-noise-medium" are one asset on the site, as are a builtin
+        # with its default size and the same builtin with that size spelled
+        # out. Load-time validation guarantees all references to one object
+        # agree on the sampler settings, so the settings in the key can never
+        # split what the identity joins -- they only keep genuinely different
+        # objects (two files, two sizes) apart.
+        if binding.is_builtin:
+            identity: tuple = builtin_identity(binding.source, binding.size)
+        else:
+            identity = (str(binding.path),)
         key = (
-            binding.source,
-            str(binding.path),
+            *identity,
             binding.filter,
             binding.wrap,
             binding.vflip,
-            binding.size,
         )
         cached = self._cache.get(key)
         if cached is not None:

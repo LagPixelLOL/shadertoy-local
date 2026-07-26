@@ -448,7 +448,7 @@ class Renderer:
                 resolutions[index] = (*source.target.size, 1)
                 continue
             elif binding.is_keyboard:
-                texture = self.channels.keyboard(state)
+                texture = self.channels.keyboard(state, binding)
                 size = texture.size
             else:
                 texture = self.channels.get(binding)
