@@ -14,9 +14,9 @@
 //
 //  Cost, measured on an RTX PRO 6000 at frame 300, whole pipeline per frame:
 //
-//      640x360     1.0 ms
-//      1280x720    3.5 ms
-//      1920x1080   6.7 ms
+//      640x360     1.4 ms
+//      1280x720    4.5 ms
+//      1920x1080   8.9 ms
 //
 //  Most of that is the erosion fBm in cloudDensity -- three fractals of two
 //  texture fetches per octave, evaluated again for every light-march and
@@ -65,7 +65,7 @@
 // pasted onto the shading. A bump has to shade its own far side or it is not
 // a bump. Most rather than all, because the six samples cannot resolve the
 // finest octave anyway and asking them to only adds noise.
-#define LIGHT_MARCH_DETAIL 0.6
+#define LIGHT_MARCH_DETAIL 0.9
 
 // Aerial perspective. The near turrets are 7 km away and the far ones 14, and
 // seven kilometres of air is not nothing: this is the sea-level scattering
@@ -117,7 +117,7 @@ float lightMarch(sampler2D tex, vec3 p, vec3 sd, float time, float jitter) {
 // Optical depth straight up. Three taps on the same geometric progression as
 // the light march, reaching 1.4 km, which is far further in than skylight ever
 // gets through a convective cloud.
-#define AMBIENT_STEPS 4
+#define AMBIENT_STEPS 3
 
 float ambientMarch(sampler2D tex, vec3 p, float time, float jitter) {
     float od = 0.0;
@@ -185,10 +185,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         float gNow = 0.5 + 0.5 * dot(sd, -rdC);
         float gKey = 0.5 + 0.5 * dot(keySunDirection(), -rdC);
         refill *= clamp(pow(max(gNow, 1e-3) / gKey, 0.45), 0.30, 1.2);
-
         vec3 skyLight = mix(skyRadiance(vec3(0.0, 1.0, 0.0), sd),
                             skyRadiance(normalize(vec3(sd.x, 0.22, sd.z)), sd),
-                            0.15) * 3.4;
+                            0.15) * 3.8;
         vec3 haze = skyRadiance(rd, sd);
         float mu = dot(rd, sd);
 
@@ -203,7 +202,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // exactly the shadowing of light arriving from the camera's side.
         // Without it, a midday crown with the sun behind it rendered black,
         // as if the shaded side hung in a sky-less vacuum (reported).
-        vec3 backFill = skyRadiance(normalize(vec3(0.0, 0.40, -0.92)), sd) * 0.5;
+        vec3 backFill = skyRadiance(normalize(vec3(0.0, 0.40, -0.92)), sd) * 1.2;
 
         // Where the ray starts inside the box. Offsetting it by a per-pixel,
         // per-frame low-discrepancy value is what trades banding for noise --

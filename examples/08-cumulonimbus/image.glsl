@@ -30,7 +30,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     cameraRay(fragCoord, iResolution, ang, ro, rd);
 
     vec4 cloud = texture(iChannel0, fragCoord / iResolution.xy);
-    float night = nightness();
 
     // Everything behind the storm: sky, and the sun if it is in this pixel. The
     // cloud's own transmittance is what hides it, which is why the disc dims
@@ -94,6 +93,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // monochrome before the tone curve ever sees it.
     vec3 roC, rdC;
     cameraRay(iResolution.xy * 0.5, iResolution, ang, roC, rdC);
+    float night = nightness();
     if (night > 0.0) {
         float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
         col = mix(col, l * vec3(0.62, 0.90, 1.45), 0.85 * night);

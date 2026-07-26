@@ -38,29 +38,30 @@ const float PI = 3.14159265359;
 // history from smearing the old lighting across the new -- a lighting
 // change converges in the filter's sixteen-frame window.
 //
-// Above the camera's left shoulder, thirty degrees or so off the view axis.
-// That placement is the whole lighting design, and it was settled by holding
-// renders against the reference photograph, twice:
+// Low, to the left, and behind the camera's shoulder. That is the whole
+// lighting design, and each of the three matters:
 //
-//   warm      at this elevation the beam has come through two and a half air
-//             masses, so it is golden, and the sky it is not lighting is
-//             blue -- the warm-against-cool split is what makes a lump of
-//             white vapour read as a solid
-//   frontal   most of what the camera sees is *lit*. The photograph is
-//             cream almost everywhere, grey only in the crevices, and only
-//             a sun in the camera's half of the sky produces that
-//             population. This shader originally sat at azimuth -1.80,
-//             nearly perpendicular to the view, on the argument that a
-//             frontal light leaves no shading gradient -- and rendered a
-//             crown that was half ambient-grey, a heap of dusty balls with
-//             the tonal proportions of the reference inverted
-//   not dead ahead
-//             thirty degrees off-axis keeps enough obliquity that every
-//             lobe still shades its own far side; at azimuth -pi (straight
-//             behind the camera) the relief genuinely disappears and the
-//             crown flattens to a cutout
-const float SUN_AZIMUTH   = -2.00;   // radians from +z, the direction of travel
-const float SUN_ELEVATION =  0.35;   // radians above the horizontal
+//   low       the beam has come through three and a half air masses, so it is
+//             orange, and the sky it is not lighting is blue -- the
+//             warm-against-cool split is what makes a lump of white vapour
+//             read as a solid
+//   lateral   a light on the camera's axis leaves no shadow and no shape; at
+//             this angle every turret shades its own right-hand side
+//   in front  the sun on the far side backlights the crown, which is a fine
+//             picture but a different one: the near faces all go dark and the
+//             detail the marcher is spending its budget on is not visible
+//
+// The azimuth wants to be very close to perpendicular to the view axis, and
+// the window is narrow. sunDirection's z component is cos(az): at -2.00 it is
+// -0.42, which puts the sun behind the camera, and a frontal light washes out
+// the near faces into big flat lobes no matter how much relief the density
+// field actually has -- the geometry is there, it just has no shading gradient
+// to show it. At -1.30 the z component is +0.27 and the near faces are all in
+// shadow. -1.60 is a hair past perpendicular, which keeps the shadow that
+// gives the turrets their shape without losing the faces that carry the
+// detail.
+const float SUN_AZIMUTH   = -1.80;   // radians from +z, the direction of travel
+const float SUN_ELEVATION =  0.26;   // radians above the horizontal
 
 // Radiance of the solar disc before atmospheric extinction reddens it, and
 // what a full moon delivers on the same scale. The real ratio is about
@@ -525,25 +526,14 @@ float cloudDensity(sampler2D tex, vec3 p, float time, float sdf,
     //   florets   signed fBm laid over everything, full strength at the
     //             skin and tapering to a third by mid-rind, so the skin is
     //             crinkled but the core stays solid instead of going porous.
-    float tf = eroFbm(tex, qw * EROSION_ANISO * 0.70, 3);
-    float turret = smoothstep(0.35, 0.78, tf);
-
-    // How convectively active this height is. The crisp fine structure of a
-    // cumulonimbus belongs to the growing turret tops; the mass below them
-    // is older vapour that has already mixed out, and both references show
-    // it as broad soft gradients with almost nothing at the floret scales.
-    // Rendering the same fine erosion top to bottom put crisp cauliflower
-    // on the low near masses where the photographs have smooth bulk -- it
-    // read as over-detail in exactly that part of the frame (reported).
-    float hAct = clamp((p.y - CLOUD_BASE) / (CLOUD_TOP - CLOUD_BASE), 0.0, 1.0);
-    float active = smoothstep(0.25, 0.60, hAct);
+    float tf = eroFbm(tex, qw * EROSION_ANISO * 0.95, 3);
+    float turret = smoothstep(0.38, 0.72, tf);
 
     float fine = eroFbm(tex, NOISE_ROT * (qw * mix(EROSION_ANISO, vec3(1.0), 0.6))
-                                 * 2.4 + 9.7, octaves) - 0.5;
+                                 * 2.4 + 9.7, octaves + 1) - 0.5;
 
-    carve += 0.30 - 0.30 * turret
-                  - fine * 0.18 * mix(0.35, 1.0, active)
-                         * (1.0 - 0.65 * smoothstep(0.10, 0.80, base));
+    carve += 0.34 - 0.28 * turret
+                  - fine * 0.24 * (1.0 - 0.65 * smoothstep(0.10, 0.80, base));
 
     // A bulge may erode the carve to nothing but never below it: negative
     // carve would be cloud outside the inflated envelope, and the marcher's
@@ -574,17 +564,21 @@ float cloudDensity(sampler2D tex, vec3 p, float time, float sdf,
     // factor fades it where the rind is thin, because a seam that carves
     // through a thin skyline leaves confetti hanging in the sky.
     if (gate > 0.02) {
-        float n = eroFbm(tex, EROSION_ROT * qw * 6.0 + 3.1, min(octaves, 2));
+        float n = eroFbm(tex, EROSION_ROT * qw * 6.0 + 3.1, octaves);
         float b = 1.0 - abs(2.0 * n - 1.0);
-        carve += (b * b - 0.38) * 0.08 * gate * mix(0.25, 1.0, active)
-                       * smoothstep(0.02, 0.12, base);
+        carve += (b * b - 0.38) * 0.10 * gate * smoothstep(0.02, 0.12, base);
     }
 
-    // (A 77 m dither octave lived here to break the 8-bit noise tile's
-    // quantisation contours. The two-channel sixteen-bit read in vnoise made
-    // it redundant, and against the references it was the single finest --
-    // and most artificial -- thing in the frame, an even grain over every
-    // near surface. Removed; checked that the contour rings did not return.)
+    // The finest octave is *not* gated on `near`, and that is load-bearing: it
+    // is also the dither that hides the tile's quantisation. The noise texture
+    // is 8-bit, so the slow three-kilometre fBm crosses its 256 levels in
+    // visible steps, and behind a density ramp this steep each step draws a
+    // contour line -- nested onion rings, worst in exactly the deep creases
+    // where a depth-gated octave has already faded out. 77 m of jitter at an
+    // amplitude above one quantisation step breaks the contours everywhere the
+    // surface can be seen.
+    carve += (1.0 - cloudFbm(tex, q * 13.0 - 27.3, 2)) *
+             max(gate, 0.35) * 0.026;
 
     // Cap how deep the carving reaches. The contributions above sum to about
     // 0.75 where their creases align, and a crease that deep is a canyon: it
@@ -596,7 +590,7 @@ float cloudDensity(sampler2D tex, vec3 p, float time, float sdf,
     // its spectrum do not move; it only stops the deepest crease intersections
     // from reaching the interior, which is what turns the crown from a cluster
     // of separate puffs back into one connected mass.
-    carve = smin(carve, 0.52, 0.12);
+    carve = smin(carve, 0.62, 0.12);
 
     // Three numbers, and all three matter:
     //
@@ -624,7 +618,7 @@ float cloudDensity(sampler2D tex, vec3 p, float time, float sdf,
     //                   absolute difference 0.00301 against 0.00306).
     //   (1 - maxCarve) * K   must stay above 1, or the deep interior grows
     //                   holes and the crown shreds.
-    float dens = clamp((base - carve) * 110.0, 0.0, 1.0);
+    float dens = clamp((base - carve) * 150.0, 0.0, 1.0);
 
     // Fade the outermost hundred metres of the rind. Where the rind is thin --
     // the skyline -- a coarse-cell bulge can survive the carving as an island,
@@ -802,7 +796,7 @@ float cloudPhase(float mu, float ecc) {
 // orders is the honest fix for that; raising the exposure is not, and the tone
 // curve's shoulder eats it anyway.
 #define MS_ORDERS 4
-const float MS_FALLOFF = 0.90;
+const float MS_FALLOFF = 0.96;
 
 vec3 sunScatter(float opticalDepth, float mu, vec3 sunCol) {
     vec3 l = vec3(0.0);
@@ -886,7 +880,7 @@ vec3 ambientScatter(vec3 skyLight, float skyOD, float sunOD, float refill) {
     // sun's, and a low red sun then renders with midday's gentle shading
     // instead of the near-chiaroscuro a four-degree sun actually produces.
     // (That was visible, and reported, before it was explained.)
-    float f = 0.45 * refill;
+    float f = 0.50 * refill;
     return amb * (f + (1.0 - f) / (1.0 + skyOD * 0.36));
 }
 
@@ -901,7 +895,7 @@ vec3 ambientScatter(vec3 skyLight, float skyOD, float sunOD, float refill) {
 // dimmer before it is anything else. sceneExposure below measures what the
 // key light actually delivers and normalises it against this calibration
 // point, so the constants keep meaning what they meant.
-const float EXPOSURE = 0.48;
+const float EXPOSURE = 0.44;
 
 // The sun the display transform was calibrated against. Deliberately
 // separate from SUN_AZIMUTH / SUN_ELEVATION / SUN_RADIANCE: change those
@@ -910,12 +904,12 @@ const float EXPOSURE = 0.48;
 // sides of the ratio dimmed together, and turning the sun into a moon
 // changed the measured key not at all: the frame came back 22x darker with
 // the daylight palette intact, sepia instead of night.)
-const float KEY_AZIMUTH   = -2.00;
-const float KEY_ELEVATION =  0.35;
+const float KEY_AZIMUTH   = -1.80;
+const float KEY_ELEVATION =  0.26;
 const vec3  KEY_RADIANCE  = vec3(1.00, 0.98, 0.95) * 22.0;
 
 // The background's own gain on top of the scene exposure; see the image pass.
-const float SKY_GAIN = 1.60;
+const float SKY_GAIN = 1.85;
 
 // What the key light delivers to the crown, up to one shared constant: the
 // transmitted solar luminance through the first scattering order's phase at
@@ -1052,9 +1046,9 @@ float acesL(float x) {
 // applied to both was what painted the creases sky-blue and made every shadow
 // pocket read as a hole in the crown. The image pass knows the cloud's
 // transmittance, which is exactly the selector needed, and passes it here.
-const vec3 GRADE_SKY          = vec3(0.66, 1.16, 1.58);
+const vec3 GRADE_SKY          = vec3(0.61, 1.16, 1.66);
 const vec3 GRADE_CLOUD_SHADOW = vec3(1.21, 1.19, 1.09);
-const vec3 GRADE_HIGHLIGHT    = vec3(1.30, 1.00, 0.62);
+const vec3 GRADE_HIGHLIGHT    = vec3(1.20, 1.00, 0.74);
 
 vec3 tonemap(vec3 x, float skyness) {
     float l = max(dot(x, vec3(0.2126, 0.7152, 0.0722)), 1e-5);
