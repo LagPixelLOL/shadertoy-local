@@ -1,0 +1,45 @@
+{
+  "name": "cumulonimbus",
+  "description": "The boiling crown of a cumulonimbus under a low sun: a jittered volumetric march through a domain-folded fBm erosion field in Buffer A, resolved by an exact rotation-reprojected 16-frame temporal filter in Buffer B.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "buffer_a": {
+    "channels": {
+      "0": {
+        "type": "builtin",
+        "source": "rgba-noise-medium",
+        "filter": "linear",
+        "wrap": "repeat"
+      }
+    }
+  },
+  "buffer_b": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_b",
+        "filter": "linear",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "image": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_b",
+        "filter": "linear",
+        "wrap": "clamp"
+      }
+    }
+  }
+}
