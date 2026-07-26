@@ -16,10 +16,9 @@
 // is the cheapest thing that gets this right, and it is not a cheat: the value
 // being smeared really is the fraction of the beam that survives the cloud
 // along that line, which is exactly what the air between the storm and the
-// camera is being lit by. Sixteen taps is enough because the thing being
-// sampled has already been through a 16-frame temporal filter and is smooth.
-#define SHAFT_STEPS 16
-#define SHAFT_DECAY 0.94
+// camera is being lit by.
+#define SHAFT_STEPS 24
+#define SHAFT_DECAY 0.96
 #define SHAFT_STRENGTH 0.055
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
@@ -51,6 +50,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     if (sunCoord.x > -1e8 && sd.y > 0.0) {
         vec2 uv = fragCoord / iResolution.xy;
         vec2 delta = (sunCoord / iResolution.xy - uv) / float(SHAFT_STEPS);
+
+        // The sampling phase is jittered per pixel, and the jitter is
+        // *static* -- no frame term. For a pixel half a frame from the sun
+        // each tap lands fifty pixels from the last, and on a regular
+        // progression every silhouette edge is echoed at each of those
+        // offsets: the rays come out stepped, a fan of ghost edges instead
+        // of a smooth beam. Sliding the whole progression by a per-pixel
+        // fraction of one step decorrelates neighbouring pixels' echoes
+        // into noise the eye reads as a smooth gradient. A frame-varying
+        // jitter would average even smoother, but this pass runs after the
+        // temporal filter, so anything time-dependent here shimmers.
+        uv += delta * ign(fragCoord);
+
         float shaft = 0.0, weight = 1.0, total = 0.0;
         for (int i = 0; i < SHAFT_STEPS; i++) {
             uv += delta;
