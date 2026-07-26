@@ -14,8 +14,8 @@
 //  Cost, measured on an RTX PRO 6000 at frame 300, whole pipeline per frame:
 //
 //      640x360     1.4 ms
-//      1280x720    4.4 ms
-//      1920x1080   8.6 ms
+//      1280x720    4.5 ms
+//      1920x1080   8.9 ms
 //
 //  Most of that is the erosion fBm in cloudDensity -- three fractals of two
 //  texture fetches per octave, evaluated again for every light-march and
@@ -64,7 +64,7 @@
 // pasted onto the shading. A bump has to shade its own far side or it is not
 // a bump. Most rather than all, because the six samples cannot resolve the
 // finest octave anyway and asking them to only adds noise.
-#define LIGHT_MARCH_DETAIL 0.85
+#define LIGHT_MARCH_DETAIL 0.9
 
 // Aerial perspective. The near turrets are 7 km away and the far ones 14, and
 // seven kilometres of air is not nothing: this is the sea-level scattering

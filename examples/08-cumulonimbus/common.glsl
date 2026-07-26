@@ -523,14 +523,25 @@ float cloudDensity(sampler2D tex, vec3 p, float time, float sdf,
     float near = 1.0 - smoothstep(0.02, 0.34, surf);
     float gate = near * detail;
 
-    // The florets themselves: a third, finer fractal that only the skin
-    // pays for. Signed like `fine`, gated on distance below the carved
-    // surface so the solid interior never evaluates it, and at these
-    // wavelengths (300 m and down) it is what makes the lobes read as
-    // cauliflower instead of dough.
+    // The florets themselves: a third, finer fractal that only the skin pays
+    // for, gated on distance below the carved surface so the solid interior
+    // never evaluates it. This one is *inverted billow* -- peaked where the
+    // field crosses its mid level, zero at the extremes -- because at these
+    // wavelengths (300 m and down) what the reference shows is not isolated
+    // bumps but a *contiguous* tiling of small lobes with shallow seams
+    // between them, and a signed field cannot tile: it is near zero over
+    // most of its volume, so it decorates the skin in patches and leaves
+    // airbrushed blanks between them (tried -- the faces read as dough with
+    // occasional warts). The mid-level set of a smooth field is one
+    // connected surface, so its crossings seam the whole skin without gaps.
+    // The same fold at *coarse* scale renders as dried mud; shallow and
+    // fine, it is exactly the brain-fold shading of a real crown. The last
+    // factor fades it where the rind is thin, because a seam that carves
+    // through a thin skyline leaves confetti hanging in the sky.
     if (gate > 0.02) {
-        carve -= (eroFbm(tex, EROSION_ROT * qw * 8.5 + 3.1,
-                         octaves) - 0.5) * 0.15 * gate;
+        float n = eroFbm(tex, EROSION_ROT * qw * 6.0 + 3.1, octaves);
+        float b = 1.0 - abs(2.0 * n - 1.0);
+        carve += (b * b - 0.38) * 0.10 * gate * smoothstep(0.02, 0.12, base);
     }
 
     // The finest octave is *not* gated on `near`, and that is load-bearing: it
@@ -591,7 +602,7 @@ float cloudDensity(sampler2D tex, vec3 p, float time, float sdf,
     // fading; making anything that lives entirely in the outer skin optically
     // thin turns the dots into faint shreds and puts a soft fringe on the
     // silhouette, which the reference has.
-    dens *= smoothstep(0.0, 0.06, base);
+    dens *= smoothstep(0.0, 0.10, base);
 
     // Thin the very tops, which are the youngest and least developed part of
     // the cell and are where it shears off into wisps.
@@ -748,7 +759,7 @@ float cloudPhase(float mu, float ecc) {
 // orders is the honest fix for that; raising the exposure is not, and the tone
 // curve's shoulder eats it anyway.
 #define MS_ORDERS 4
-const float MS_FALLOFF = 0.90;
+const float MS_FALLOFF = 0.93;
 
 vec3 sunScatter(float opticalDepth, float mu, vec3 sunCol) {
     vec3 l = vec3(0.0);
@@ -811,14 +822,14 @@ vec3 ambientScatter(vec3 skyLight, float skyOD, float sunOD) {
     // radiance field inside the cloud stops falling because it is being fed
     // laterally from the walls. A pure falloff of any shape reaches zero
     // eventually and renders wells the photograph does not contain.
-    return amb * (0.45 + 0.55 / (1.0 + skyOD * 0.36));
+    return amb * (0.62 + 0.38 / (1.0 + skyOD * 0.36));
 }
 
 // ---- display --------------------------------------------------------------
 
 // Exposure. A constant, because the sun is: see sunDirection above for what has
 // to change here when it stops being one.
-const float EXPOSURE = 0.50;
+const float EXPOSURE = 0.42;
 
 // Narkowicz's fit of the ACES filmic curve. A sunlit turret against a shadowed
 // seam spans several stops, and a linear clamp throws the top of that away as a

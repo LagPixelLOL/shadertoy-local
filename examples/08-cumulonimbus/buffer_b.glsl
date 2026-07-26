@@ -3,7 +3,8 @@
 //  reprojected and averaged into one.
 //
 //  iChannel0: Buffer A (rgb = scattered light, a = transmittance), nearest
-//  iChannel1: Buffer B, i.e. this pass one frame ago, linear
+//  iChannel1: Buffer B, i.e. this pass one frame ago, linear (resampled
+//             through a Catmull-Rom kernel; see historyCatmullRom)
 //  output:    the same layout, filtered
 //
 //  This is the pass that pays for the detail. Buffer A takes one jittered
@@ -34,6 +35,40 @@
 
 vec4 fetchA(ivec2 q) {
     return texelFetch(iChannel0, clamp(q, ivec2(0), ivec2(iResolution.xy) - 1), 0);
+}
+
+// Catmull-Rom history resampling, in nine bilinear taps. The obvious single
+// bilinear tap is not an option, and the reason is quantitative: the camera
+// rotates a little every frame, so the reprojected position is always
+// fractional, and the history is resampled *again every frame* -- sixteen
+// bilinear resamples compound into a blur kernel a couple of pixels wide,
+// which is exactly the scale of the floret detail the whole pipeline exists
+// to resolve. Measured against an externally averaged stack of Buffer A
+// frames, the bilinear version was visibly softer everywhere and the fine
+// silhouette crenellation was simply gone. Catmull-Rom's negative lobes
+// undo most of the successive-resample spread; what little over/undershoot
+// they add is caught by the variance clip below, which was already there.
+vec4 historyCatmullRom(vec2 pos, vec2 res) {
+    vec2 centre = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - centre;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 p0 = (centre - 1.0) / res;
+    vec2 p3 = (centre + 2.0) / res;
+    vec2 p12 = (centre + w2 / w12) / res;
+    return
+        texture(iChannel1, vec2(p0.x,  p0.y))  * (w0.x  * w0.y) +
+        texture(iChannel1, vec2(p12.x, p0.y))  * (w12.x * w0.y) +
+        texture(iChannel1, vec2(p3.x,  p0.y))  * (w3.x  * w0.y) +
+        texture(iChannel1, vec2(p0.x,  p12.y)) * (w0.x  * w12.y) +
+        texture(iChannel1, vec2(p12.x, p12.y)) * (w12.x * w12.y) +
+        texture(iChannel1, vec2(p3.x,  p12.y)) * (w3.x  * w12.y) +
+        texture(iChannel1, vec2(p0.x,  p3.y))  * (w0.x  * w3.y) +
+        texture(iChannel1, vec2(p12.x, p3.y))  * (w12.x * w3.y) +
+        texture(iChannel1, vec2(p3.x,  p3.y))  * (w3.x  * w3.y);
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
@@ -67,11 +102,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         cameraRay(fragCoord, iResolution, ang, ro, rd);
         vec2 prevCoord = cameraProject(rd, iResolution, prevAng);
 
-        // Half a pixel in from the edge, so the bilinear tap cannot reach
-        // outside the frame and clamp a wrong sample into the history.
-        if (all(greaterThan(prevCoord, vec2(0.5))) &&
-            all(lessThan(prevCoord, iResolution.xy - 0.5))) {
-            vec4 history = texture(iChannel1, prevCoord / iResolution.xy);
+        // Two and a half pixels in from the edge, so no Catmull-Rom tap can
+        // reach outside the frame and clamp a wrong sample into the history.
+        if (all(greaterThan(prevCoord, vec2(2.5))) &&
+            all(lessThan(prevCoord, iResolution.xy - 2.5))) {
+            vec4 history = historyCatmullRom(prevCoord, iResolution.xy);
             resolved = mix(clamp(history, lo, hi), current, BLEND);
         }
     }
