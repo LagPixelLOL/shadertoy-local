@@ -759,14 +759,14 @@ float cloudPhase(float mu, float ecc) {
 // orders is the honest fix for that; raising the exposure is not, and the tone
 // curve's shoulder eats it anyway.
 #define MS_ORDERS 4
-const float MS_FALLOFF = 0.93;
+const float MS_FALLOFF = 0.96;
 
 vec3 sunScatter(float opticalDepth, float mu, vec3 sunCol) {
     vec3 l = vec3(0.0);
     float a = 1.0, b = 1.0, c = 1.0;
     for (int i = 0; i < MS_ORDERS; i++) {
         l += b * exp(-a * opticalDepth) * cloudPhase(mu, c);
-        a *= 0.40;          // extinction: deeper orders are attenuated less
+        a *= 0.46;          // extinction: deeper orders are attenuated less
         b *= MS_FALLOFF;    // contribution
         c *= 0.60;          // eccentricity: deeper orders are more isotropic
     }
@@ -827,9 +827,83 @@ vec3 ambientScatter(vec3 skyLight, float skyOD, float sunOD) {
 
 // ---- display --------------------------------------------------------------
 
-// Exposure. A constant, because the sun is: see sunDirection above for what has
-// to change here when it stops being one.
-const float EXPOSURE = 0.42;
+// Exposure *at the calibration sun below*. Everything about the display
+// transform -- this constant, the grades, the percentile match against the
+// reference photograph -- was tuned with the sun low, lateral and golden.
+// Point the sun somewhere else, or dim it to a moon, and a fixed exposure is
+// wrong by whole stops: a high backlit sun is brighter by one stop of
+// transmittance and another two of forward phase, and a full moon is 22x
+// dimmer before it is anything else. sceneExposure below measures what the
+// key light actually delivers and normalises it against this calibration
+// point, so the constants keep meaning what they meant.
+const float EXPOSURE = 0.44;
+
+// The sun the display transform was calibrated against. Deliberately
+// separate from SUN_AZIMUTH / SUN_ELEVATION / SUN_RADIANCE: change those
+// freely, the calibration point stays put. (The radiance has to be pinned
+// here too, not read from SUN_RADIANCE -- the first version did that, both
+// sides of the ratio dimmed together, and turning the sun into a moon
+// changed the measured key not at all: the frame came back 22x darker with
+// the daylight palette intact, sepia instead of night.)
+const float KEY_AZIMUTH   = -1.80;
+const float KEY_ELEVATION =  0.26;
+const vec3  KEY_RADIANCE  = vec3(1.00, 0.98, 0.95) * 22.0;
+
+// What the key light delivers to the crown, up to one shared constant: the
+// transmitted solar luminance through the first scattering order's phase at
+// the viewing geometry (which is what makes a backlit sun three stops hotter
+// than a lateral one -- the forward lobe is not optional), a diffuse floor
+// standing in for the deeper orders, and the skylight.
+float keyLuminance(vec3 radiance, vec3 sd, vec3 rdC) {
+    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+    vec3 sunCol = radiance * sunTransmittance(sd);
+    float mu = clamp(dot(rdC, sd), -1.0, 1.0);
+    float ph = cloudPhase(mu, 1.0) + 0.08;
+    // The sky term scales with the requested radiance: skyRadiance reads the
+    // live SUN_RADIANCE internally and is linear in it, so it is rescaled to
+    // whichever radiance this evaluation is about -- a no-op for the live
+    // side of the ratio, and the calibration radiance for the reference side.
+    vec3 sky = skyRadiance(vec3(0.0, 1.0, 0.0), sd) *
+               (dot(radiance, LUMA) / dot(SUN_RADIANCE, LUMA));
+    return dot(sunCol, LUMA) * ph + dot(sky, LUMA) * 1.2;
+}
+
+vec3 keySunDirection() {
+    return vec3(sin(KEY_AZIMUTH) * cos(KEY_ELEVATION),
+                sin(KEY_ELEVATION),
+                cos(KEY_AZIMUTH) * cos(KEY_ELEVATION));
+}
+
+// The exposure for whatever light the scene actually has. *rdC* is the view
+// direction at the frame centre -- one direction for the whole frame, because
+// exposure is a camera property; feeding the per-pixel ray through this would
+// vignette the frame with the phase function.
+//
+// The normalisation is asymmetric on purpose, the way a photographer's is.
+// A scene brighter than the calibration sun is exposed all the way down --
+// highlights are unrecoverable, and "too bright" is never the picture anyone
+// wanted. A scene dimmer than it is only partially compensated: full
+// normalisation renders a moonlit night indistinguishable from noon, which
+// is exactly the "day for night" look this is trying not to have. At 0.55,
+// the 4.5 stops between the calibration sun and a full moon come back as
+// two stops of darkness on film -- luminous cloud, unmistakably night.
+float sceneExposure(vec3 sd, vec3 rdC) {
+    float ref = keyLuminance(KEY_RADIANCE, keySunDirection(), rdC);
+    float now = max(keyLuminance(SUN_RADIANCE, sd, rdC), 1e-5);
+    float r = ref / now;
+    return EXPOSURE * pow(r, r > 1.0 ? 0.55 : 1.0);
+}
+
+// How far into night the scene is: 0 in any daylight, 1 by full moon (the
+// key light five stops or more below calibration). Drives the Purkinje shift
+// in the image pass -- rod vision keeps no colour and the blue receptors
+// give out last, so a moonlit cloud is dim, blue-grey and nearly
+// monochrome, which no amount of exposure arithmetic produces by itself.
+float nightness(vec3 sd, vec3 rdC) {
+    float stops = log2(keyLuminance(KEY_RADIANCE, keySunDirection(), rdC) /
+                       max(keyLuminance(SUN_RADIANCE, sd, rdC), 1e-5));
+    return smoothstep(2.5, 5.0, stops);
+}
 
 // Narkowicz's fit of the ACES filmic curve. A sunlit turret against a shadowed
 // seam spans several stops, and a linear clamp throws the top of that away as a

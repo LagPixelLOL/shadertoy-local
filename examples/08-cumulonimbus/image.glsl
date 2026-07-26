@@ -61,7 +61,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                (shaft / total) * lobe * SHAFT_STRENGTH;
     }
 
-    col = tonemap(col * EXPOSURE, cloud.a);
+    // Exposure is a camera property, so it is computed once for the frame
+    // centre, not per pixel; see sceneExposure. The Purkinje shift is what
+    // keeps a moonlit version of this scene from being day with the lights
+    // dimmed: rod vision holds no colour, so as the key light falls stops
+    // below the calibration sun the frame slides toward dim blue-grey
+    // monochrome before the tone curve ever sees it.
+    vec3 roC, rdC;
+    cameraRay(iResolution.xy * 0.5, iResolution, ang, roC, rdC);
+    float night = nightness(sd, rdC);
+    if (night > 0.0) {
+        float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
+        col = mix(col, l * vec3(0.62, 0.90, 1.45), 0.85 * night);
+    }
+
+    col = tonemap(col * sceneExposure(sd, rdC), cloud.a);
     col = pow(col, vec3(0.4545));   // linear -> sRGB
 
     // The sky is a smooth gradient over hundreds of pixels, which is the exact
