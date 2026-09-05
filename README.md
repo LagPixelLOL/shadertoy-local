@@ -606,11 +606,47 @@ Each directory in `examples/` is a runnable project with its own
 | `05-interactive` | Keyboard rows and `iMouse` |
 | `06-portable-common` | Uniform-struct protocol for a lint-clean Common tab |
 | `07-path-traced-box` | All five passes at once: a path tracer plus a denoiser |
-| `08-cumulonimbus` | Volumetric raymarching: a storm cloud's boiling crown; steer the sun with the mouse, `S` for moonlight |
+| `08-cumulus` | Volumetric raymarching: an isolated fair-weather cloud; steer the sun with the mouse, `S` for moonlight |
 
 ```bash
 shadertoy render -C examples/03-feedback-trail --frame 120
 ```
+
+### Cumulus
+
+`08-cumulus` uses an animated continuous density field with multiscale billow
+displacement and dilute, wind-torn side/base layers. Those layers condense inward
+to an opaque core and blend gradually into the crown, rather than leaving the
+entire lower cloud translucent under backlighting. Buffer A raymarches at full
+resolution with Beer-Lambert integration, up to 28 sun-shadow samples
+and six ambient samples per occupied view sample. Conservative density bounds
+skip empty or fully dense noise evaluations. Buffer B uses a clipped exponential
+temporal filter with a 16-frame time constant and Catmull-Rom reprojection.
+Clipping preserves matching current/history details; lighting changes reset
+history. Its `(0, 0)` texel stores lighting metadata, which Image excludes from
+sky composition and screen-space light shafts. Minimum view steps range from
+10 metres in the lower layers to 6 metres in the crown. Image applies a fixed
+daylight white balance before tonemapping, retaining a separate moonlight response.
+
+```bash
+shadertoy render -C examples/08-cumulus -r 1920x1080 --frame 120 --precharge 32
+shadertoy render -C examples/08-cumulus --frame 120 --precharge 32 \
+  --input '[{"frame":0,"op":"key_toggle","keys":["s"]}]'
+shadertoy render -C examples/08-cumulus -r 1920x1080 --frame 120 \
+  --precharge 32 --count 60 --no-write
+```
+
+Measured on an NVIDIA RTX PRO 6000 Blackwell Server Edition, OpenGL 4.6:
+60 captured frames after 32 warm-up frames, with no image writes. Values are
+mean rendering milliseconds, including CPU dispatch and GPU completion but
+excluding readback. The lighting sweep includes default, high sun, frontal,
+backlit, sunset and moonlight. These are not performance guarantees for other GPUs.
+
+| Resolution | Default | Slowest Lighting Mean |
+|---|---:|---:|
+| 640x360 | 6.56 ms | 6.59 ms |
+| 1280x720 | 11.17 ms | 11.31 ms |
+| 1920x1080 | 19.95 ms | 19.95 ms |
 
 ## Development
 

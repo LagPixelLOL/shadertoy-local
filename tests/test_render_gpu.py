@@ -463,7 +463,7 @@ class TestExamples:
             "05-interactive",
             "06-portable-common",
             "07-path-traced-box",
-            "08-cumulonimbus",
+            "08-cumulus",
         ],
     )
     def test_example_renders(self, name, gl_context):
@@ -485,6 +485,247 @@ class TestExamples:
             renderer.release()
         assert stats["finite"], f"{name} produced NaN/Inf"
         assert not stats["is_uniform"], f"{name} produced a flat frame"
+
+
+class TestCumulus:
+    def test_dilute_margin_condenses_into_dense_core(self, make_project, gl_context):
+        from .conftest import EXAMPLES_DIR
+
+        root = make_project(
+            {
+                "common.glsl": (EXAMPLES_DIR / "08-cumulus" / "common.glsl").read_text(
+                    encoding="utf-8"
+                ),
+                "image.glsl": """
+void mainImage(out vec4 c, in vec2 f) {
+    vec2 u = (f - 0.5) / (iResolution.xy - 1.0);
+    float height = mix(1.6, 3.3, u.y);
+    float sdf = mix(0.6, -1.1, u.x);
+    float density = cloudDensity(iChannel0, vec3(0.2, height, -0.3), 2.0, sdf);
+    c = vec4(density, crownCondensation(height), 0.0, 1.0);
+}
+""",
+            },
+            config={"image": {"channels": {"0": {
+                "type": "builtin", "source": "rgba-noise-medium",
+                "filter": "linear", "wrap": "repeat",
+            }}}},
+        )
+        capture, renderer = _render(root, gl_context, width=128, height=64)
+        try:
+            pixels = capture.images["image"]
+            density = pixels[..., 0]
+            condensation = pixels[:, 0, 1]
+            assert np.isfinite(pixels).all()
+            assert ((density >= 0.0) & (density <= 1.0)).all()
+            np.testing.assert_array_equal(density[:, 0], 0.0)
+            # A dilute boundary must not cap the entire lower interior at 0.18.
+            np.testing.assert_array_equal(density[:, -1], 1.0)
+            assert (np.diff(density, axis=1) >= -2e-5).all()
+            lower = density[condensation == 0.0]
+            assert ((lower > 0.0) & (lower < 0.18)).any()
+            assert condensation[0] == 0.0 and condensation[-1] == 1.0
+            assert (np.diff(condensation) >= -1e-6).all()
+            assert ((condensation > 0.0) & (condensation < 1.0)).sum() >= 24
+        finally:
+            renderer.release()
+
+    def test_density_shortcuts_preserve_fringe_and_bounds(self, make_project, gl_context):
+        from .conftest import EXAMPLES_DIR
+
+        common = (EXAMPLES_DIR / "08-cumulus" / "common.glsl").read_text(encoding="utf-8")
+        density = "float cloudDensity(" + common.split("float cloudDensity(", 1)[1].split(
+            "\n}", 1
+        )[0] + "\n}"
+        # Run the actual field without any empty/full shortcut as the oracle.
+        full = "\n".join(
+            line for line in density.splitlines()
+            if not ("if (" in line and "return " in line)
+        ).replace("float cloudDensity(", "float fullDensity(", 1)
+        assert full.count("return ") == 1
+        root = make_project(
+            {
+                "common.glsl": common + "\n" + full,
+                "image.glsl": """
+void mainImage(out vec4 c, in vec2 f) {
+    vec3 u = vec3(hash12(f), hash12(f + 19.19), hash12(f + 73.73));
+    vec3 p = mix(BOX_MIN - 0.3, BOX_MAX + 0.3, u);
+    float time = hash12(f + 127.7) * 120.0;
+    // Independent envelope values exercise the shortcuts even deep in the core.
+    float sdf = mix(-1.0, 0.6, hash12(f + 211.3));
+    float bounded = cloudDensity(iChannel0, p, time, sdf);
+    float full = fullDensity(iChannel0, p, time, sdf);
+    float actual = fullDensity(iChannel0, p, time, cloudEnvelope(p, time));
+    bool outside = any(lessThan(p, BOX_MIN)) || any(greaterThan(p, BOX_MAX));
+    c = vec4(bounded, full, actual, outside ? actual : 0.0);
+}
+""",
+            },
+            config={"image": {"channels": {"0": {
+                "type": "builtin", "source": "rgba-noise-medium",
+                "filter": "linear", "wrap": "repeat",
+            }}}},
+        )
+        capture, renderer = _render(root, gl_context, width=256, height=256)
+        try:
+            values = capture.images["image"]
+            assert np.isfinite(values).all()
+            assert ((values >= 0.0) & (values <= 1.0)).all()
+            # Different control flow can change the driver's float reassociation.
+            np.testing.assert_allclose(values[..., 0], values[..., 1], rtol=1e-5, atol=3e-6)
+            np.testing.assert_array_equal(values[..., 3], 0.0)
+            assert (values[..., 1] == 0.0).sum() > 100
+            assert (values[..., 1] == 1.0).sum() > 100
+            assert ((values[..., 2] > 0.0) & (values[..., 2] < 1.0)).sum() > 100
+        finally:
+            renderer.release()
+
+    def test_settled_moon_scales_radiance_not_transmittance(self, gl_context):
+        from .conftest import EXAMPLES_DIR
+
+        buffers = []
+        for ops in ([], [{"frame": 0, "op": "key_toggle", "keys": ["s"]}]):
+            capture, renderer = _render(
+                EXAMPLES_DIR / "08-cumulus", gl_context,
+                width=96, height=64, frame=20,
+                inputs=InputTimeline.from_spec(ops),
+            )
+            try:
+                for name, image in capture.images.items():
+                    assert np.isfinite(image).all(), f"{name} produced NaN/Inf"
+                resolved = capture.images["buffer_b"]
+                assert (resolved[..., :3] >= 0.0).all()
+                assert ((resolved[..., 3] >= 0.0) & (resolved[..., 3] <= 1.0)).all()
+                buffers.append(capture.images["buffer_a"])
+            finally:
+                renderer.release()
+
+        day, moon = buffers
+        assert day[..., :3].max() > 1e-3, "expected lit cloud, not an empty frame"
+        np.testing.assert_array_equal(moon[..., 3], day[..., 3])
+        np.testing.assert_allclose(
+            moon[..., :3], day[..., :3] / 22.0, rtol=2e-4, atol=1e-6,
+        )
+
+    @pytest.mark.parametrize(
+        "transition",
+        [
+            {"op": "mouse_move", "pos": [60, 40]},
+            {"op": "key_toggle", "keys": ["s"]},
+        ],
+        ids=["mouse", "s"],
+    )
+    def test_lighting_transition_resets_history_once(self, gl_context, transition):
+        from .conftest import EXAMPLES_DIR
+
+        renderer = Renderer(
+            load_project(EXAMPLES_DIR / "08-cumulus"), gl_context.ctx,
+            RenderSettings(
+                width=96, height=64, precharge="all",
+                inputs=InputTimeline.from_spec([
+                    {"frame": 0, "op": "mouse_down", "pos": [24, 48]},
+                    {"frame": 20, **transition},
+                ]),
+            ),
+        )
+        try:
+            renderer.compile()
+            for capture in renderer.run([19, 20, 21]):
+                for name, image in capture.images.items():
+                    assert np.isfinite(image).all(), f"{name} produced NaN/Inf"
+                # Buffer B texel (0, 0) is lighting metadata, not cloud data.
+                current = capture.images["buffer_a"].reshape(-1, 4)[1:]
+                resolved = capture.images["buffer_b"].reshape(-1, 4)[1:]
+                if capture.frame == 20:
+                    np.testing.assert_array_equal(resolved, current)
+                else:
+                    cloud = current[:, 3] < 0.99
+                    assert cloud.any(), "expected cloud pixels to exercise history"
+                    difference = np.abs(resolved[cloud, :3] - current[cloud, :3])
+                    assert difference.mean() > 1e-5, (
+                        f"frame {capture.frame} should blend history, not reset"
+                    )
+        finally:
+            renderer.release()
+
+    def test_current_inclusive_clipping_preserves_isolated_detail(
+        self, make_project, gl_context
+    ):
+        """Settled history must not erode a stationary opaque detail in sky."""
+        from .conftest import EXAMPLES_DIR
+
+        root = make_project(
+            {
+                # Identity reprojection keeps every history tap on its texel.
+                "common.glsl": """
+void setupLighting(vec4 mouse, vec3 res, float moon) {}
+vec3 sunDirection() { return vec3(0.0, 1.0, 0.0); }
+vec2 cameraAngles(float time) { return vec2(0.0); }
+void cameraRay(vec2 coord, vec3 res, vec2 ang, out vec3 ro, out vec3 rd) {
+    ro = vec3(0.0);
+    rd = vec3(coord, 1.0);
+}
+vec2 cameraProject(vec3 rd, vec3 res, vec2 ang) { return rd.xy; }
+""",
+                "buffer_a.glsl": """
+void mainImage(out vec4 c, in vec2 f) {
+    c = all(equal(ivec2(f), ivec2(iResolution.xy * 0.5)))
+        ? vec4(4.0, 2.0, 1.0, 0.0) : vec4(0.0, 0.0, 0.0, 1.0);
+}
+""",
+                "buffer_b.glsl": (
+                    EXAMPLES_DIR / "08-cumulus" / "buffer_b.glsl"
+                ).read_text(encoding="utf-8"),
+                "image.glsl": """
+void mainImage(out vec4 c, in vec2 f) {
+    c = texture(iChannel0, f / iResolution.xy);
+}
+""",
+            },
+            config={
+                "buffer_a": {"channels": {}},
+                "buffer_b": {
+                    "channels": {
+                        "0": {
+                            "type": "buffer", "source": "buffer_a",
+                            "filter": "nearest", "wrap": "clamp",
+                        },
+                        "1": {
+                            "type": "buffer", "source": "buffer_b",
+                            "filter": "linear", "wrap": "clamp",
+                        },
+                        "2": {"type": "keyboard"},
+                    },
+                },
+                "image": {
+                    "channels": {
+                        "0": {
+                            "type": "buffer", "source": "buffer_b",
+                            "filter": "linear", "wrap": "clamp",
+                        },
+                    },
+                },
+            },
+        )
+        capture, renderer = _render(
+            root, gl_context, width=32, height=32, frame=20, precharge="all",
+        )
+        try:
+            for name in ("buffer_b", "image"):
+                resolved = capture.images[name]
+                assert np.isfinite(resolved).all(), f"{name} produced NaN/Inf"
+                assert (resolved[..., :3] >= 0.0).all()
+                assert ((resolved[..., 3] >= 0.0) & (resolved[..., 3] <= 1.0)).all()
+                # The old sigma-only box kept ~53% radiance and ~0.47 alpha,
+                # even though history and current were identical initially.
+                np.testing.assert_allclose(
+                    resolved[16, 16], [4.0, 2.0, 1.0, 0.0], rtol=0, atol=1e-6,
+                )
+                np.testing.assert_allclose(
+                    resolved[16, 17], [0.0, 0.0, 0.0, 1.0], rtol=0, atol=1e-6,
+                )
+        finally:
+            renderer.release()
 
 
 class TestBufferFiltering:

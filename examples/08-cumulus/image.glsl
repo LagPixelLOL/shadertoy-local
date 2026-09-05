@@ -6,17 +6,13 @@
 //
 //  Buffers mean this shader has to be run forward from frame 0, which the
 //  renderer does by default (--precharge all):
-//      shadertoy render -C examples/08-cumulonimbus --frame 120
-//  The temporal filter has converged after about 30 frames, so a cheaper render
-//  of the same picture is:
-//      shadertoy render -C examples/08-cumulonimbus --frame 120 --precharge 32
+//      shadertoy render -C examples/08-cumulus --frame 120
+//  For a quicker preview with partial temporal warm-up (not identical history):
+//      shadertoy render -C examples/08-cumulus --frame 120 --precharge 32
 // ============================================================================
 
-// Crepuscular rays. A radial blur of the cloud's transmittance toward the sun
-// is the cheapest thing that gets this right, and it is not a cheat: the value
-// being smeared really is the fraction of the beam that survives the cloud
-// along that line, which is exactly what the air between the storm and the
-// camera is being lit by.
+// Screen-space approximation to crepuscular rays. It uses view transmittance,
+// not a 3D shadow volume, so off-screen occluders cannot contribute.
 #define SHAFT_STEPS 24
 #define SHAFT_DECAY 0.96
 #define SHAFT_STRENGTH 0.055
@@ -24,25 +20,17 @@
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Same lighting state as Buffer A: see setupLighting.
     setupLighting(iMouse, iResolution, texelFetch(iChannel1, ivec2(83, 2), 0).x);
-    vec3 sd = sunDirection(iTime);
+    vec3 sd = sunDirection();
     vec2 ang = cameraAngles(iTime);
     vec3 ro, rd;
     cameraRay(fragCoord, iResolution, ang, ro, rd);
 
     vec4 cloud = texture(iChannel0, fragCoord / iResolution.xy);
+    // Buffer B reserves this sky-border texel for temporal lighting state.
+    if (all(lessThan(fragCoord, vec2(1.0)))) cloud = vec4(0.0, 0.0, 0.0, 1.0);
 
-    // Everything behind the storm: sky, and the sun if it is in this pixel. The
-    // cloud's own transmittance is what hides it, which is why the disc dims
-    // and reddens as an anvil edge drifts across it without any special case.
-    //
-    // The gain is the sky's share of the exposure split. The scene exposure
-    // is keyed to the crown -- it came down by nearly a stop to take the lit
-    // faces off the tone curve's shoulder -- and the sky, which was
-    // calibrated against the reference photograph at the old exposure, came
-    // down with it and went dark. A real camera cannot expose the two
-    // separately; a real camera also does not have this sky model's missing
-    // scattering orders, so the gain is doing double duty as the correction
-    // the grade alone could not carry.
+    // Cloud transmittance occludes the sky and sun. SKY_GAIN calibrates the
+    // approximate atmosphere against the cloud's multiple-scattering model.
     vec3 background = (skyRadiance(rd, sd) + sunDisc(rd, sd)) * SKY_GAIN;
     vec3 col = background * cloud.a + cloud.rgb;
 
@@ -66,14 +54,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         float shaft = 0.0, weight = 1.0, total = 0.0;
         for (int i = 0; i < SHAFT_STEPS; i++) {
             uv += delta;
-            // Taps that leave the frame are dropped, not clamped. Clamping
-            // replicates the edge texel along the whole remaining tail, which
-            // draws a hard horizontal streak out of the side of the frame --
-            // the one artefact a radial blur is guaranteed to produce if you
-            // let it.
+            // Off-screen taps assume clear sky, rather than extending the edge
+            // texel into a false streak. Keep them in the normalization weight.
             float inside = float(all(greaterThanEqual(uv, vec2(0.0))) &&
                                  all(lessThanEqual(uv, vec2(1.0))));
-            shaft += mix(1.0, texture(iChannel0, uv).a, inside) * weight;
+            vec2 sampleUV = max(uv, 1.5 / iResolution.xy);
+            shaft += mix(1.0, texture(iChannel0, sampleUV).a, inside) * weight;
             total += weight;
             weight *= SHAFT_DECAY;
         }
@@ -94,6 +80,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 roC, rdC;
     cameraRay(iResolution.xy * 0.5, iResolution, ang, roC, rdC);
     float night = nightness();
+    // Fixed daylight camera balance removes the high-sun yellow cast without
+    // neutralizing the warmer spectrum at sunset or adding blue to moonlight.
+    col *= mix(vec3(0.88, 1.0, 1.12), vec3(1.0), night);
     if (night > 0.0) {
         float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
         col = mix(col, l * vec3(0.62, 0.90, 1.45), 0.85 * night);

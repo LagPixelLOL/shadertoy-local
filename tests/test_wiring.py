@@ -234,7 +234,7 @@ class TestBlockers:
             "05-interactive": True,
             "06-portable-common": True,
             "07-path-traced-box": True,
-            "08-cumulonimbus": True,
+            "08-cumulus": True,
         }
         for name, portable in expected_portable.items():
             report = build_report(load_project(EXAMPLES_DIR / name))
