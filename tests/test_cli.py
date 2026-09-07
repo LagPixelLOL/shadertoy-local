@@ -668,6 +668,48 @@ class TestStructTernaryFailsHard:
         assert payload["errors"] == 0
 
 
+class TestReservedWordsFailHard:
+    @pytest.mark.parametrize("word", ["patch", "noperspective"])
+    @pytest.mark.parametrize("portability", [True, False])
+    def test_check_when_desktop_compiler_accepts_identifier(
+        self, capsys, make_project, monkeypatch, word, portability
+    ):
+        from unittest.mock import Mock
+
+        # Model a permissive desktop compiler without depending on a GL driver.
+        monkeypatch.setattr("shadertoy_local.cli._open_context", Mock())
+        renderer = Mock(passes={})
+        renderer.compile.return_value = []
+        monkeypatch.setattr("shadertoy_local.renderer.Renderer", Mock(return_value=renderer))
+        root = make_project({
+            "image.glsl": (
+                "void mainImage(out vec4 c, in vec2 f){\n"
+                f"    float {word} = 1.0;\n"
+                f"    c = vec4({word});\n"
+                "}\n"
+            ),
+        })
+        extra = [] if portability else ["--no-portability"]
+        code, payload, err = run(capsys, "check", "-C", str(root), "--json", *extra)
+        assert code == (EXIT_FAILED if portability else EXIT_OK)
+        assert payload["ok"] is (not portability)
+        assert payload["diagnostics"] == []
+        assert payload["errors"] == (2 if portability else 0)
+        assert payload["warnings"] == 0
+        if portability:
+            assert len(payload["portability"]) == 2
+            entry = payload["portability"][0]
+            assert entry["severity"] == "error"
+            assert entry["code"] == "ST-RESERVED"
+            assert entry["file"] == "image.glsl"
+            assert (entry["line"], entry["column"]) == (2, 11)
+            assert repr(word) in entry["message"]
+            assert "ST-RESERVED" in err
+        else:
+            assert payload["portability"] == []
+            assert "ST-RESERVED" not in err
+
+
 @pytest.mark.gpu
 class TestInfoRuntimeCheck:
     """`info` compiles and runs a shader on every device by default."""

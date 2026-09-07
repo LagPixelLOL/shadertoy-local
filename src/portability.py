@@ -326,22 +326,23 @@ def lint_all(project: Project) -> list[Diagnostic]:
 # --------------------------------------------------------------------------
 
 #: Words the GLSL ES 3.00 specification reserves (section 3.7), restricted to
-#: those a desktop driver will happily accept as plain identifiers. Declaring
+#: those desktop drivers can accept as plain identifiers. Declaring
 #: ``float active;`` compiles without a murmur on NVIDIA's GL 4.6 -- and stops
 #: the same shader dead on shadertoy.com with ``'active' : Illegal use of
 #: reserved word``. That divergence is exactly the kind this tool exists to
 #: catch before the site does: it was found by pasting a shader that had
 #: passed every local check.
 #:
-#: Real keywords of *both* dialects (``if``, ``return``, ``uniform``...) are
-#: not here, since the local compile already rejects them; this list is the
-#: silent set.
+#: Keywords legal in *both* dialects (``if``, ``return``, ``uniform``...) must
+#: not be flagged in valid code. Desktop-only qualifiers such as ``patch`` and
+#: ``noperspective`` are still reserved in ES 3.00; do not rely on a desktop
+#: driver to reject them as identifiers.
 RESERVED_ES_WORDS = frozenset({
     "active", "asm", "attribute", "cast", "class", "coherent", "common",
     "enum", "extern", "external", "filter", "fixed", "fvec2", "fvec3",
     "fvec4", "goto", "half", "hvec2", "hvec3", "hvec4", "inline", "input",
-    "interface", "long", "namespace", "noinline", "output", "packed",
-    "partition", "public", "readonly", "resource", "restrict", "sample",
+    "interface", "long", "namespace", "noinline", "noperspective", "output", "packed",
+    "partition", "patch", "public", "readonly", "resource", "restrict", "sample",
     "short", "sizeof", "static", "subroutine", "superp", "template", "this",
     "typedef", "union", "unsigned", "using", "varying", "volatile",
     "writeonly",

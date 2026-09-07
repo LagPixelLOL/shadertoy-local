@@ -6,6 +6,8 @@ standalone against a minimal header in which only iDate and iSampleRate exist.
 
 from __future__ import annotations
 
+import pytest
+
 from shadertoy_local.portability import (
     COMMON_SAFE_UNIFORMS,
     PASS_SPECIFIC_UNIFORMS,
@@ -340,11 +342,12 @@ class TestReservedWords:
     check.
     """
 
-    def test_flags_reserved_identifier_as_error(self, make_project):
+    @pytest.mark.parametrize("word", ["active", "patch", "noperspective"])
+    def test_flags_reserved_identifier_as_error(self, make_project, word):
         image = (
             "void mainImage(out vec4 c, in vec2 f){\n"
-            "    float active = 1.0;\n"
-            "    c = vec4(active);\n"
+            f"    float {word} = 1.0;\n"
+            f"    c = vec4({word});\n"
             "}\n"
         )
         diagnostics = _reserved(make_project, image)
@@ -352,7 +355,10 @@ class TestReservedWords:
         assert all(d.severity == "error" for d in diagnostics)
         assert all(d.is_error for d in diagnostics)
         assert all(d.code == "ST-RESERVED" for d in diagnostics)
-        assert "active" in diagnostics[0].message
+        assert all(repr(word) in d.message for d in diagnostics)
+        assert all(d.file == "image.glsl" for d in diagnostics)
+        assert all(d.pass_name == "image" for d in diagnostics)
+        assert [(d.line, d.column) for d in diagnostics] == [(2, 11), (3, 14)]
 
     def test_reports_accurate_position(self, make_project):
         image = "void mainImage(out vec4 c, in vec2 f){ float filter = 1.0; c = vec4(filter); }\n"
@@ -361,8 +367,9 @@ class TestReservedWords:
         assert first.line == 1
         assert image[first.column - 1 :].startswith("filter")
 
-    def test_flags_common_too(self, make_project):
-        common = "float half = 0.5;\n"
+    @pytest.mark.parametrize("word", ["half", "patch", "noperspective"])
+    def test_flags_common_too(self, make_project, word):
+        common = f"float {word} = 0.5;\n"
         image = "void mainImage(out vec4 c, in vec2 f){ c = vec4(1.0); }\n"
         diagnostics = _reserved(make_project, image, common=common)
         assert len(diagnostics) == 1
@@ -373,7 +380,8 @@ class TestReservedWords:
         image = (
             "void mainImage(out vec4 c, in vec2 f){\n"
             "    float activeCount = 1.0;  float interactive = 2.0;\n"
-            "    c = vec4(activeCount * interactive);\n"
+            "    float patchValue = 1.0;  float noperspectiveValue = 2.0;\n"
+            "    c = vec4(activeCount * interactive * patchValue * noperspectiveValue);\n"
             "}\n"
         )
         assert _reserved(make_project, image) == []
@@ -382,17 +390,21 @@ class TestReservedWords:
         image = (
             "// the active turret, using a filter\n"
             "/* input and output */\n"
+            "// float patch = 1.0;\n"
+            "/* float noperspective = 1.0; */\n"
             "void mainImage(out vec4 c, in vec2 f){ c = vec4(1.0); }\n"
         )
         assert _reserved(make_project, image) == []
 
-    def test_define_bodies_are_not_exempt(self, make_project):
+    @pytest.mark.parametrize("word", ["active", "patch", "noperspective"])
+    def test_define_bodies_are_not_exempt(self, make_project, word):
         """Unlike ST-COMMON: a reserved word in a macro fails on the site
         wherever the macro is expanded, so the definition is the right place
         to point at."""
         image = (
-            "#define PICK(x) float active = (x);\n"
-            "void mainImage(out vec4 c, in vec2 f){ PICK(1.0) c = vec4(active); }\n"
+            f"#define PICK(x) float {word} = (x);\n"
+            "void mainImage(out vec4 c, in vec2 f){ PICK(1.0) "
+            f"c = vec4({word}); }}\n"
         )
         diagnostics = _reserved(make_project, image)
         assert any(d.line == 1 for d in diagnostics)
