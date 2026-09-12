@@ -607,6 +607,7 @@ Each directory in `examples/` is a runnable project with its own
 | `06-portable-common` | Uniform-struct protocol for a lint-clean Common tab |
 | `07-path-traced-box` | All five passes at once: a path tracer plus a denoiser |
 | `08-cumulus` | Volumetric raymarching: an isolated fair-weather cloud; steer the sun with the mouse, `S` for moonlight |
+| `09-spectral-traced-crystal` | Continuous-wavelength crystal optics, D65 illumination, progressive CIE XYZ accumulation, and three-axis mouse rotation |
 
 ```bash
 shadertoy render -C examples/03-feedback-trail --frame 120
@@ -633,7 +634,8 @@ software rasterizer to catch it:
 SHADERTOY_DEVICE=1 SHADERTOY_ALLOW_SOFTWARE=1 pytest
 ```
 
-That costs about 0.5 s extra. It is worth running before a release: it is how a
-crash on every Mesa driver was found, where Mesa reports an array uniform's
-length as the number of elements the shader indexes while NVIDIA reports the
-full declared length.
+Software rendering can be substantially slower for the path-traced and
+volumetric examples. It is worth running before a release: it is how a crash on
+every Mesa driver was found, where Mesa reports an array uniform's length as the
+number of elements the shader indexes while NVIDIA reports the full declared
+length.

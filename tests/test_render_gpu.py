@@ -464,6 +464,7 @@ class TestExamples:
             "06-portable-common",
             "07-path-traced-box",
             "08-cumulus",
+            "09-spectral-traced-crystal",
         ],
     )
     def test_example_renders(self, name, gl_context):
@@ -723,6 +724,165 @@ void mainImage(out vec4 c, in vec2 f) {
                 )
                 np.testing.assert_allclose(
                     resolved[16, 17], [0.0, 0.0, 0.0, 1.0], rtol=0, atol=1e-6,
+                )
+        finally:
+            renderer.release()
+
+
+class TestSpectralCrystal:
+    def test_continuous_spectrum_and_xyz_luminance(self, make_project, gl_context):
+        from .conftest import EXAMPLES_DIR
+
+        root = make_project({
+            "common.glsl": (
+                EXAMPLES_DIR / "09-spectral-traced-crystal" / "common.glsl"
+            ).read_text(encoding="utf-8"),
+            "image.glsl": """
+void mainImage(out vec4 c, in vec2 f) {
+    float wavelength = mix(LAMBDA_MIN, LAMBDA_MAX, (f.x - 0.5) / (iResolution.x - 1.0));
+    if (f.y < 1.0) {
+        c = vec4(glassIOR(wavelength), glassAbsorption(wavelength),
+                 illuminantD65(wavelength), lum(vec3(9.0, 2.0, 7.0)));
+    } else if (f.y < 2.0) {
+        c = vec4(cieXYZ(wavelength) / (WAVELENGTH_PDF * D65_Y_INTEGRAL),
+                 exp(-glassAbsorption(wavelength) * 0.7));
+    } else {
+        CrystalState state = CrystalState(vec4(0, 0, 0, 1), vec4(0, 0, 1, 17));
+        c = vec4(xyzToLinearSRGB(cieXYZ(wavelength)), accumulationCount(state, 1000017));
+    }
+}
+""",
+        })
+        capture, renderer = _render(root, gl_context, width=471, height=3)
+        try:
+            pixels = capture.images["image"]
+            assert np.isfinite(pixels).all()
+            ior, absorption, illuminant = pixels[0, :, :3].T
+            assert (np.diff(ior) < 0.0).all()
+            assert np.unique(ior).size == 471, "dispersion must not select three RGB indices"
+            wavelength = np.arange(360.0, 831.0)
+            np.testing.assert_allclose(ior, 1.475 + 0.014 / (wavelength * 0.001) ** 2, rtol=2e-6)
+            assert (absorption > 0.0).all() and (illuminant > 0.0).all()
+            expected_absorption = 0.012 + 0.050 * np.exp(-0.5 * ((wavelength - 690.0) / 65.0) ** 2)
+            np.testing.assert_allclose(absorption, expected_absorption, rtol=2e-6)
+            np.testing.assert_allclose(pixels[1, :, 3], np.exp(-expected_absorption * 0.7), rtol=2e-6)
+            np.testing.assert_array_equal(pixels[0, :, 3], 2.0)
+            np.testing.assert_array_equal(pixels[2, :, 3], 1000001.0)
+
+            xyz = pixels[1, :, :3]
+            assert (xyz >= 0.0).all()
+            # Average the actual estimator, including its PDF and normalization,
+            # over the wavelength interval using one-nanometre trapezoidal steps.
+            spectrum = xyz * illuminant[:, None]
+            white = ((spectrum[:-1] + spectrum[1:]) * 0.5).sum(axis=0) / 470.0
+            np.testing.assert_allclose(white, [0.949593, 1.0, 1.088006], atol=3e-4)
+            rgb = pixels[2, :, :3]
+            assert (rgb < -0.1).any(), "out-of-gamut spectra must not be clipped before integration"
+            for nm, channel in [(450, 2), (530, 1), (650, 0)]:
+                assert rgb[nm - 360].argmax() == channel
+        finally:
+            renderer.release()
+
+    @pytest.mark.parametrize(
+        "position,axis,roll",
+        [
+            ([0.625, 0.5], [0, 1, 0], False),
+            ([0.5, 0.625], [-1, 0, 0], False),
+            ([0.625, 0.5], [0, 0, -1], True),
+        ],
+        ids=["yaw", "pitch", "roll"],
+    )
+    def test_rotation_resets_accumulation_once(self, gl_context, position, axis, roll):
+        from .conftest import EXAMPLES_DIR
+
+        events = [{"frame": 0, "op": "mouse_down", "pos": [0.5, 0.5], "normalized": True}]
+        if roll:
+            events.append({"frame": 0, "op": "key_down", "keys": ["shift"]})
+        events.extend([
+            {"frame": 3, "op": "mouse_move", "pos": position, "normalized": True},
+            {"frame": 5, "op": "mouse_up"},
+            {"frame": 6, "op": "mouse_down", "pos": [0.2, 0.2], "normalized": True},
+        ])
+        renderer = Renderer(
+            load_project(EXAMPLES_DIR / "09-spectral-traced-crystal"), gl_context.ctx,
+            RenderSettings(width=48, height=32, inputs=InputTimeline.from_spec(events)),
+        )
+        try:
+            renderer.compile()
+            for capture in renderer.run([2, 3, 4, 5, 6, 7]):
+                for name, image in capture.images.items():
+                    assert np.isfinite(image).all(), f"{name} produced NaN/Inf"
+                image = capture.images["image"]
+                assert ((image >= 0.0) & (image <= 1.0)).all()
+                current = capture.images["buffer_a"]
+                quaternion = current[0, 0]
+                controls = current[0, 1]
+                np.testing.assert_allclose(np.linalg.norm(quaternion), 1.0, atol=2e-6)
+                # The first two texels are metadata; A alpha is geometry, not Y^2.
+                xyz = current.reshape(-1, 4)[2:, :3]
+                fresh = np.column_stack((xyz, xyz[:, 1] ** 2))
+                resolved = capture.images["buffer_b"].reshape(-1, 4)[2:]
+                if capture.frame == 2:
+                    initial = quaternion.copy()
+                    assert controls[3] == 0.0
+                elif capture.frame == 3:
+                    delta = np.append(np.asarray(axis) * np.sin(np.pi / 8), np.cos(np.pi / 8))
+                    expected = np.append(
+                        delta[3] * initial[:3] + initial[3] * delta[:3] + np.cross(delta[:3], initial[:3]),
+                        delta[3] * initial[3] - np.dot(delta[:3], initial[:3]),
+                    )
+                    np.testing.assert_allclose(quaternion, expected, atol=2e-6)
+                    rotated = quaternion.copy()
+                    np.testing.assert_allclose(resolved, fresh, rtol=2e-6, atol=1e-6)
+                    assert controls[3] == 3.0
+                else:
+                    np.testing.assert_array_equal(quaternion, rotated)
+                    assert controls[3] == 3.0, "holding, release, and re-grab must keep history"
+                    expected = previous + (fresh - previous) / (capture.frame - 3 + 1)
+                    np.testing.assert_allclose(resolved, expected, rtol=2e-6, atol=1e-6)
+                previous = resolved.copy()
+        finally:
+            renderer.release()
+
+    def test_accumulation_retains_early_samples_and_xyz_moments(self, make_project, gl_context):
+        from .conftest import EXAMPLES_DIR
+
+        example = EXAMPLES_DIR / "09-spectral-traced-crystal"
+        root = make_project(
+            {
+                "common.glsl": (example / "common.glsl").read_text(encoding="utf-8"),
+                "buffer_b.glsl": (example / "buffer_b.glsl").read_text(encoding="utf-8"),
+                "buffer_a.glsl": """
+void mainImage(out vec4 c, in vec2 f) {
+    float resetFrame = iFrame < 64 ? 0.0 : 64.0;
+    if (ivec2(f) == ivec2(0, 0)) { c = vec4(0, 0, 0, 1); return; }
+    if (ivec2(f) == ivec2(1, 0)) { c = vec4(0, 0, 1, resetFrame); return; }
+    vec3 xyz = iFrame == 0 ? vec3(64, 32, 16) : vec3(1, 2, 3);
+    if (iFrame >= 64) xyz = vec3(7, 3, 2);
+    c = vec4(xyz, 0);
+}
+""",
+                "image.glsl": """
+void mainImage(out vec4 c, in vec2 f) { c = texelFetch(iChannel0, ivec2(f), 0); }
+""",
+            },
+            config={
+                "buffer_b": {"channels": {"0": "buffer_a", "1": "buffer_b"}},
+                "image": {"channels": {"0": "buffer_b"}},
+            },
+        )
+        renderer = Renderer(load_project(root), gl_context.ctx, RenderSettings(width=4, height=2))
+        try:
+            renderer.compile()
+            for capture in renderer.run([0, 1, 40, 63, 64, 65, 128]):
+                frame = capture.frame
+                if frame < 64:
+                    expected = (np.array([64, 32, 16, 32 ** 2]) + frame * np.array([1, 2, 3, 2 ** 2])) / (frame + 1)
+                else:
+                    expected = np.array([7, 3, 2, 3 ** 2])
+                resolved = capture.images["buffer_b"]
+                np.testing.assert_allclose(
+                    resolved, np.broadcast_to(expected, resolved.shape), rtol=2e-6, atol=2e-6,
                 )
         finally:
             renderer.release()

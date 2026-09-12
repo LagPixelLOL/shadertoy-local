@@ -1,0 +1,87 @@
+{
+  "name": "spectral-traced-crystal",
+  "description": "Continuous-wavelength spectral tracing over 360-830 nm: D65 emission, Cauchy glass dispersion, spectral Beer-Lambert absorption, and CIE XYZ accumulation converted to sRGB only for display. A white box, full-height left-side collimated bar, and pentagonal crystal with pyramidal ends. Fixed camera; drag for pitch/yaw, Shift + horizontal drag for roll. Uncapped progressive accumulation restarts on rotation.",
+  "defaults": {
+    "width": 640,
+    "height": 360,
+    "fps": 60
+  },
+  "buffer_a": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "keyboard",
+        "filter": "nearest"
+      }
+    }
+  },
+  "buffer_b": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_b",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "buffer_c": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_b",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "buffer_d": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_c",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  },
+  "image": {
+    "channels": {
+      "0": {
+        "type": "buffer",
+        "source": "buffer_d",
+        "filter": "nearest",
+        "wrap": "clamp"
+      },
+      "1": {
+        "type": "buffer",
+        "source": "buffer_a",
+        "filter": "nearest",
+        "wrap": "clamp"
+      }
+    }
+  }
+}
